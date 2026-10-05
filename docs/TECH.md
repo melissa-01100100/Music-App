@@ -1,7 +1,7 @@
 # Tech
 
 > Owner: developer. Stack, folder structure, conventions, how to run and test.
-> Status: **Phase 0 plan (audio detection prototype)**. No application code has been written yet.
+> Status: **Phase 0 in progress.** Plan approved by owner. Milestone 0.1 (mic + level meter) **built, pending owner phone test**.
 > Last updated: 2026-10-05
 
 **How to read this doc:** Sections marked **(Plain English)** are written for the owner. Sections marked **(Technical)** are for the developer. You can skip those without missing any decisions.
@@ -260,6 +260,38 @@ prototype/                     # Phase 0 web prototype (kept separate from any f
 **Label format** (draft): `{ "sampleRate": 48000, "device": "...", "events": [ { "timeSec": 1.234, "chord": "C" }, ... ] }`. Test-mode exports produce this automatically (expected chord + beat time), so the owner's test sessions become fixtures.
 
 **Conventions:** small pure functions; every DSP parameter in `config.ts`; the detector is deterministic (same input gives the same output); `npm test` must pass before deploy.
+
+---
+
+## 5a. How to run (developer) (Technical)
+
+All commands run in `prototype/`. Node 20.19+ or 22 (CI uses 22).
+
+| Command | What it does |
+|---|---|
+| `npm ci` | Install exact dependency versions from `package-lock.json` |
+| `npm run dev` | Dev server on http://localhost:5173 (mic works on localhost) |
+| `npm test` | Vitest unit tests (Node, no browser) |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run build` | Typecheck + production build into `prototype/dist/` |
+| `npm run preview` | Serve the production build on http://localhost:4173 |
+
+- **Worklet bundling:** `src/audio/capture.worklet.ts` is imported in `mic.ts` with `?worker&url`, so Vite bundles it (and its imports from `detection/`) into one self-contained file in `dist/assets/`. Do not load it with a plain `new URL('./x.ts', ...)`: that copies the `.ts` file without compiling it.
+- **Never import the worklet module from main-thread code.** It calls `registerProcessor`, which only exists on the audio thread. Shared constants go in `audio/messages.ts`.
+- `base: './'` in `vite.config.ts` makes asset paths relative, so the same build works at `/` and at the GitHub Pages sub-path `/Music-App/`.
+- The build ID shown in the page header (and in "Copy info") is the first 7 characters of `GITHUB_SHA`, or `dev` for local builds. Use it to confirm which version the owner has loaded.
+- `window.__micDebug.session` exposes the running `MicSession` in the browser console (debugging and smoke tests).
+- **Deploy:** `.github/workflows/deploy-prototype.yml` runs on push to `main` or `claude/gallant-archimedes-8jhys7` (when `prototype/**` or the workflow changes) and on manual dispatch: `npm ci`, `npm test`, `npm run build`, then deploys `prototype/dist` to GitHub Pages. One-time setup: Settings → Pages → Source: "GitHub Actions". To deploy from a non-default branch, that branch must also be allowed in Settings → Environments → `github-pages` → Deployment branches.
+- **Smoke test (manual, headless):** run `npm run preview`, then open it in Chromium with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`, tap Start, and check that "Frames processed" increases and the console has no errors. The fake device plays a full-scale beep, so the meter shows red/CLIP. That is expected.
+
+### Progress
+
+| Milestone | Status |
+|---|---|
+| 0.1 Mic + level meter | **Built 2026-10-05.** Unit tests and headless smoke test pass. **Pending owner test on Android Chrome** (meter responds to guitar, processing-off settings reported, lock/unlock resume, deploy link works). |
+| 0.2–0.5 | Not started |
+
+**0.1 code map:** `src/audio/mic.ts` (getUserMedia with processing off, AudioContext created/resumed in the Start click, statechange/visibility handling with "Tap to resume", re-acquiring the mic if the track ended, Screen Wake Lock), `src/audio/capture.worklet.ts` (counts frames, posts sum-of-squares/peak/clip count every `blockSizeFrames`), `src/audio/errors.ts` (friendly error messages), `src/detection/config.ts` + `level.ts` (pure meter maths), `src/ui/meter.ts`, `src/ui/deviceReport.ts`, `src/main.ts`.
 
 ---
 
