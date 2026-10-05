@@ -91,7 +91,7 @@ Because there are only **four** possible answers, the task is much easier than g
 - **Onset function:** half-wave-rectified **spectral flux** on log-compressed magnitudes (`log(1 + γ·|X|)`), optionally weighted toward higher bins (high-frequency content, HFC). Strum attacks are broadband and bright, while sustained notes are not, so HFC weighting suppresses retriggers from ringing strings.
 - **Adaptive threshold:** `threshold[n] = δ + λ · median(odf[n−a … n+b])`, plus an absolute floor tied to the mic noise level measured at start-up.
 - **Peak picking:** local maximum within ±w frames, above threshold. Lookahead b ≈ 2–3 hops (~10–16 ms) of added detection delay.
-- **Minimum inter-onset interval:** e.g. 80–120 ms, so a single strum that hits six strings over 20–40 ms gives **one** event, not six. (This is tunable. Fast up-down strumming may need a lower value; see the open questions.)
+- **Minimum inter-onset interval:** e.g. 60–100 ms, so a single strum that hits six strings over 20–40 ms gives **one** event, not six. Down-up strumming patterns are in scope (owner answer, 2026-10-05): at 120 BPM, eighth-note down-up strums are 250 ms apart and sixteenths 125 ms, so the interval must stay well below ~120 ms. Each event also records **strum direction (down/up)** where it can be estimated (low strings first = down, high strings first = up), as a stretch goal.
 - **Timestamp:** the onset frame's sample index, refined back toward the start of the energy rise (e.g. the first frame above 50% of the peak flux). The time is the **sample count**, not wall-clock (see section 3.2).
 
 ### 2.3 Chord recognition (Technical)
@@ -206,12 +206,14 @@ Measured on the golden recordings **and** live on the target phones:
 | False triggers in a quiet room, guitar not played (incl. string ringing, handling noise) | **< 1 per minute** |
 | Chord result on screen after the strum | ≤ 250 ms |
 | Progression at medium tempo (e.g. 90 BPM, one strum per beat) | ≥ 90% correct chords |
+| Strumming pattern (e.g. D-DU-UDU at 80 BPM, one chord per bar) | ≥ 90% of strums detected, ≥ 85% correct chords, no double/missed events on up-strums |
 | Runs smoothly | No audio dropouts over a 5-minute session |
 
 ### 4.3 Target devices
 
 - **The owner's own phone(s)** first (model to be confirmed, see open questions).
-- At least **one recent iPhone (Safari)** and **one mid-range Android (Chrome)**. If the owner has only one, we note the gap as a risk for later.
+- **Android phones in Chrome** (owner answer, 2026-10-05). If the owner has more than one Android phone, test on each, because Android mic delay varies a lot between models.
+- iPhone/Safari is **not** a Phase 0 target. The code avoids anything Android-only so iPhone can be added later.
 - Guitar: the owner's guitar (acoustic assumed) in standard tuning.
 
 ---
@@ -285,6 +287,7 @@ prototype/                     # Phase 0 web prototype (kept separate from any f
 11. **Single chords:** in Test mode choose "10 × each chord". Strum each chord 10 times, one strum per click, with a full downstroke across all the strings in the shape.
 12. **Slow progression:** choose "Progression – slow" (e.g. 60 BPM): Am → C → G → D, one strum per beat, 4 times through.
 13. **Medium progression:** same at "medium" (e.g. 90 BPM).
+13b. **Strumming pattern:** choose "Pattern": play a down-down-up-up-down-up pattern on each chord, one chord per bar, at slow tempo. This checks that up-strums are counted too.
 14. **Silence check:** choose "Silence – 1 minute". Hold the guitar without playing and let strings ring or touch them lightly, as you naturally would. This counts false triggers.
 15. After each test the screen shows a **score card**. Take a screenshot or note the numbers.
 
@@ -302,7 +305,7 @@ Each milestone ends with a link you can open on your phone.
 
 | # | Milestone | What you'll see | Acceptance criteria |
 |---|---|---|---|
-| **0.1** | Mic + level meter on the phone | Start button, level meter, device info panel | Works on iOS Safari and Android Chrome over HTTPS. Meter responds to the guitar. Processing-off settings are reported. Deploy pipeline works (push → live link). Survives lock/unlock with a "tap to resume". |
+| **0.1** | Mic + level meter on the phone | Start button, level meter, device info panel | Works in Android Chrome over HTTPS (on every Android phone the owner has). Meter responds to the guitar. Processing-off settings are reported. Deploy pipeline works (push → live link). Survives lock/unlock with a "tap to resume". |
 | **0.2** | Strum (onset) detection | A flash plus a log line on every strum, sensitivity slider | Recall ≥ 95% and < 1 false trigger/min on the first recordings. One event per strum (no doubles). Recording/export of raw audio works early so we can start the golden set. |
 | **0.3** | Chroma + chord classification | Big chord name for every strum | ≥ 85% correct on clean single-chord strums without calibration (first pass). Golden tests run in Node. Meyda cross-check agrees. |
 | **0.4** | Confidence + calibration | Confidence %, "?" when unsure, latency test, "teach it my guitar" | ≥ 90% correct after per-player calibration. Wrong-but-confident ≤ 3%. Latency calibration gives repeatable values (±5 ms across 3 runs). Timing error median < 15 ms, p95 < 30 ms. |
@@ -316,10 +319,10 @@ Each milestone ends with a link you can open on your phone.
 
 ### 8.1 Assumptions (made for Phase 0 only; not game rules)
 - A1. Standard tuning, no capo, open-position shapes as in the table in 2.3.
-- A2. Acoustic steel-string guitar played through the air into the phone's built-in mic. No cable or interface.
-- A3. Full strums (not single notes, arpeggios or muted strums). Down-strums in tests. Up-strums are logged but not yet targeted.
+- A2. **Confirmed:** acoustic steel-string guitar played through the air into the phone's built-in mic. No cable or interface.
+- A3. Full strums (not single notes, arpeggios or muted strums). **Updated:** the game will have an easier mode (which chord) and an advanced mode (strums on the beat with strumming patterns), so both down- and up-strums are targeted, and timing accuracy matters.
 - A4. Only Am, C, G, D, plus "none/unsure". Nothing else needs recognising yet.
-- A5. No game music plays from the phone while listening (except the test metronome).
+- A5. **Confirmed:** game audio (music, metronome) goes through **headphones** while listening, so the phone speaker stays quiet and the mic hears only the guitar. **Wired (USB-C) headphones are recommended**: Bluetooth headphones add ~100–300 ms of delay. That delay can be partly cancelled by the latency calibration, but it is less steady. In Phase 0 the metronome can also be a visual flash, so headphones are optional there.
 - A6. One player, quiet room, phone stationary.
 
 ### 8.2 Risks
@@ -333,6 +336,9 @@ Each milestone ends with a link you can open on your phone.
 - **R8. iOS interruptions** (calls, Siri, lock screen) stop audio. Must be handled gracefully; matters more in the real game.
 
 ### 8.3 Open questions for the game-director (and owner)
+
+**Answered by the owner (2026-10-05):** Q1, both modes: an easier "which chord" mode and an advanced mode with the beat and strumming patterns. Q4, no speaker music while listening; headphones are fine (developer recommends wired). Q10, Android phones and an acoustic guitar. The rest are still open, and none of them block Phase 0.
+
 1. **Timing vs. correctness:** will the game judge *when* you strum (rhythm game, on the beat) or only *which* chord? This sets how hard the latency targets must be.
 2. **Tempo and strumming patterns:** expected BPM range? One strum per chord change, or continuous down-up patterns (which affects the minimum gap between strums)?
 3. **Chord set growth:** will later levels add chords (Em, E, A, F, barre chords, 7ths)? A larger set makes template matching harder and may push towards ML earlier.
