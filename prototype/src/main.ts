@@ -1,6 +1,7 @@
 import './style.css';
-import { levelConfig } from './detection/config';
+import { analysisConfig, levelConfig, noiseFloorConfig } from './detection/config';
 import { initialMeterState, rms, toDbfs, updateMeter, type MeterState } from './detection/level';
+import { isNoisyRoom, NoiseFloorEstimator } from './detection/noiseFloor';
 import { MicSession } from './audio/mic';
 import { classifyMicError, type MicError } from './audio/errors';
 import type { LevelMessage } from './audio/messages';
@@ -24,10 +25,18 @@ const ui = {
   info: $<HTMLTableElement>('info'),
   copy: $<HTMLButtonElement>('copy'),
   build: $('build'),
+  roomHint: $('room-hint'),
+  remeasure: $<HTMLButtonElement>('remeasure'),
 };
 
 const meterView = createMeterView({
   fill: $('meter-fill'),
+  roomFill: $('meter-room-fill'),
+  roomZone: $('meter-room-zone'),
+  floorMark: $('meter-floor'),
+  chip: $('chip'),
+  roomDb: $('room-db'),
+  aboveDb: $('above-db'),
   peak: $('meter-peak'),
   db: $('db'),
   peakDb: $('peak-db'),
@@ -35,7 +44,7 @@ const meterView = createMeterView({
   scale: $('scale'),
 });
 
-const BUILD = `v0.1 · ${__BUILD_ID__} · ${__BUILD_TIME__}`;
+const BUILD = `v0.1.1 · ${__BUILD_ID__} · ${__BUILD_TIME__}`;
 ui.build.textContent = BUILD;
 
 // ---- state ----
@@ -48,10 +57,18 @@ let framesProcessed = 0;
 let blocksReceived = 0;
 let emptyQuanta = 0;
 let lastInfoRenderMs = 0;
+const noiseFloor = new NoiseFloorEstimator(noiseFloorConfig);
 
 // ---- worklet messages: queue, consumed by the animation loop ----
 function onWorkletMessage(msg: LevelMessage): void {
   pending.push(msg);
+  // Noise floor works per block (not per animation frame), on the high-passed signal.
+  if (session && msg.count > 0) {
+    const blockDb = toDbfs(Math.sqrt(msg.sumSquares / msg.count), noiseFloorConfig.minDb);
+    const wasMeasuring = noiseFloor.state === 'measuring';
+    noiseFloor.addBlock(blockDb, (msg.count / session.ctx.sampleRate) * 1000);
+    if (wasMeasuring && noiseFloor.initialFloorDb !== null) onQuietMeasured();
+  }
   framesProcessed = msg.framesProcessed;
   emptyQuanta = msg.emptyQuanta;
   blocksReceived++;
@@ -76,6 +93,7 @@ function frame(now: number): void {
     pending = [];
     const floor = levelConfig.meterFloorDb;
     input = {
+      // Analysis (high-passed) level and peak; clips are counted on the raw signal.
       rmsDb: toDbfs(rms({ sumSquares, count, peak, clipCount: clips }), floor),
       peakDb: toDbfs(peak, floor),
       clipped: clips > 0,
@@ -83,7 +101,11 @@ function frame(now: number): void {
   }
   meter = updateMeter(meter, input, now, lastFrameMs, levelConfig);
   lastFrameMs = now;
-  meterView.render(meter, now, !!session);
+  meterView.render(meter, now, !!session, {
+    floorDb: noiseFloor.floorDb,
+    measuring: !!session && noiseFloor.state === 'measuring',
+    remainingMs: noiseFloor.remainingMs,
+  });
 
   if (now - lastInfoRenderMs > 500) {
     lastInfoRenderMs = now;
@@ -107,6 +129,8 @@ function reportInput(now: number): ReportInput {
     uaMobile: uaData?.mobile,
     isSecureContext: window.isSecureContext,
     buildId: BUILD,
+    highPassHz: analysisConfig.highPassHz,
+    highPassStages: analysisConfig.highPassStages,
   };
   if (session) {
     const info = session.info();
@@ -119,6 +143,12 @@ function reportInput(now: number): ReportInput {
     input.blocksReceived = blocksReceived;
     input.emptyQuanta = emptyQuanta;
     input.stalled = isStalled(now);
+    input.noiseFloor = {
+      phase: noiseFloor.state,
+      currentDb: noiseFloor.floorDb,
+      initialDb: noiseFloor.initialFloorDb,
+      noisy: isNoisyRoom(noiseFloor.initialFloorDb, noiseFloorConfig.noisyRoomDb),
+    };
   }
   return input;
 }
@@ -165,8 +195,27 @@ function updateResumeButton(): void {
   if (session) {
     ui.status.textContent = needs
       ? 'Audio paused (screen locked or app switched). Tap to resume.'
-      : 'Listening. Strum your guitar.';
+      : noiseFloor.state === 'measuring'
+        ? 'Measuring your room. Stay quiet and keep the guitar still.'
+        : 'Listening. Strum your guitar.';
   }
+}
+
+// ---- noise floor ----
+function onQuietMeasured(): void {
+  const initial = noiseFloor.initialFloorDb;
+  ui.roomHint.hidden = !isNoisyRoom(initial, noiseFloorConfig.noisyRoomDb);
+  ui.remeasure.hidden = false;
+  console.info('[room] noise floor measured', initial?.toFixed(1), 'dBFS');
+  updateResumeButton();
+  renderInfo(performance.now());
+}
+
+function startQuietMeasurement(): void {
+  noiseFloor.restart();
+  ui.roomHint.hidden = true;
+  ui.remeasure.hidden = true;
+  updateResumeButton();
 }
 
 // ---- buttons ----
@@ -177,11 +226,17 @@ ui.start.addEventListener('click', async () => {
   showError(null);
   try {
     session = await MicSession.start(
-      { blockSizeFrames: levelConfig.blockSizeFrames, clipThreshold: levelConfig.clipThreshold },
+      {
+        blockSizeFrames: levelConfig.blockSizeFrames,
+        clipThreshold: levelConfig.clipThreshold,
+        highPassHz: analysisConfig.highPassHz,
+        highPassStages: analysisConfig.highPassStages,
+      },
       { onMessage: onWorkletMessage, onChange: () => renderInfo(performance.now()) },
     );
     lastBlockAtMs = performance.now();
     ui.start.hidden = true;
+    startQuietMeasurement();
     updateResumeButton();
     renderInfo(performance.now());
     console.info('[mic] started', session.info());
@@ -205,6 +260,10 @@ ui.resume.addEventListener('click', async () => {
   updateResumeButton();
 });
 
+ui.remeasure.addEventListener('click', () => {
+  if (session) startQuietMeasurement();
+});
+
 ui.copy.addEventListener('click', async () => {
   const text = reportToText(buildDeviceReport(reportInput(performance.now())));
   try {
@@ -223,5 +282,8 @@ requestAnimationFrame(frame);
 (window as unknown as { __micDebug: unknown }).__micDebug = {
   get session() {
     return session;
+  },
+  get noiseFloor() {
+    return noiseFloor;
   },
 };

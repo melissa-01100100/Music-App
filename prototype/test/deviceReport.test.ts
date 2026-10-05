@@ -71,3 +71,21 @@ describe('formatMs', () => {
     expect(formatMs(undefined)).toBe('not reported');
   });
 });
+
+describe('0.1.1 rows: high-pass and noise floor', () => {
+  it('shows the analysis high-pass before start', () => {
+    expect(find(buildDeviceReport({ ...base, highPassHz: 70 }), 'Analysis high-pass')?.value).toBe('70 Hz (2nd-order, meter/detection only)');
+    expect(find(buildDeviceReport({ ...base, highPassHz: 70, highPassStages: 2 }), 'Analysis high-pass')?.value).toContain('4th-order');
+  });
+
+  it('shows measuring, then the floor, and warns for a noisy room', () => {
+    const m = mic({ echoCancellation: false });
+    const measuring = buildDeviceReport({ ...base, mic: m, noiseFloor: { phase: 'measuring', currentDb: null, initialDb: null, noisy: false } });
+    expect(find(measuring, 'Room noise floor')?.value).toBe('measuring...');
+    const ok = buildDeviceReport({ ...base, mic: m, noiseFloor: { phase: 'tracking', currentDb: -58.24, initialDb: -57.9, noisy: false } });
+    expect(find(ok, 'Room noise floor')).toMatchObject({ value: '-58.2 dBFS now, -57.9 dBFS at start', status: 'ok' });
+    const noisy = buildDeviceReport({ ...base, mic: m, noiseFloor: { phase: 'tracking', currentDb: -30, initialDb: -30, noisy: true } });
+    expect(find(noisy, 'Room noise floor')?.status).toBe('warn');
+    expect(reportToText(noisy)).toContain('Room noise floor: -30.0 dBFS now, -30.0 dBFS at start [warn]');
+  });
+});

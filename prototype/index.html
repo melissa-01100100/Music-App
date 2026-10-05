@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#111418" />
     <link rel="icon" href="data:," />
-    <title>Chord Detect Prototype 0.1</title>
+    <title>Chord Detect Prototype 0.1.1</title>
   </head>
   <body>
     <main class="app">
@@ -26,17 +26,27 @@
       <button id="resume" class="big-btn resume" type="button" hidden>Tap to resume</button>
 
       <section class="card meter-card" aria-label="Microphone level">
+        <div id="chip" class="chip off" role="status" aria-live="polite">Not listening</div>
         <div class="readout">
           <span class="db" id="db">-- dB</span>
           <span class="clip" id="clip">CLIP</span>
         </div>
         <div class="meter" id="meter">
+          <div class="meter-room-zone" id="meter-room-zone" hidden></div>
           <div class="meter-fill" id="meter-fill"></div>
+          <div class="meter-room-fill" id="meter-room-fill" hidden></div>
+          <div class="meter-floor" id="meter-floor" hidden></div>
           <div class="meter-peak" id="meter-peak"></div>
         </div>
         <div class="scale" id="scale"></div>
+        <div class="room-readouts">
+          <span>Room noise: <b id="room-db">--</b></span>
+          <span>Above room: <b id="above-db">--</b></span>
+        </div>
         <p class="peak-readout">Peak <span id="peak-db">--</span> dB</p>
-        <p class="hint">Strum: the bar should reach green or amber. If it turns red, move the phone further away.</p>
+        <p id="room-hint" class="room-hint" hidden>Your room is a bit noisy — try a quieter spot, or move away from fans/TV.</p>
+        <p class="hint">The grey part of the bar is your room&rsquo;s background noise. Strum: the bar should go past the grey into green or amber. If it turns red, move the phone further away.</p>
+        <button id="remeasure" class="small-btn" type="button" hidden>Measure room again</button>
       </section>
 
       <section class="card info-card">

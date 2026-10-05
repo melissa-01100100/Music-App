@@ -1,8 +1,8 @@
 {
   "name": "chord-detect-prototype",
   "private": true,
-  "version": "0.1.0",
-  "description": "Phase 0 audio detection prototype (mic + level meter, milestone 0.1)",
+  "version": "0.1.1",
+  "description": "Phase 0 audio detection prototype (mic + level meter, milestone 0.1.1)",
   "type": "module",
   "engines": {
     "node": ">=20.19"

@@ -38,6 +38,20 @@ export interface ReportInput {
   blocksReceived?: number;
   emptyQuanta?: number;
   stalled?: boolean;
+  /** Analysis-path high-pass cutoff in Hz (the raw signal is not filtered). */
+  highPassHz?: number;
+  /** Cascaded 2nd-order sections (order = 2 x stages). */
+  highPassStages?: number;
+  /** Room noise floor (present once the mic has started). */
+  noiseFloor?: {
+    phase: 'measuring' | 'tracking';
+    /** Current (tracked) floor in dBFS, null while measuring. */
+    currentDb: number | null;
+    /** Floor from the "stay quiet" measurement, null while measuring. */
+    initialDb: number | null;
+    /** Initial floor is above the "noisy room" threshold. */
+    noisy: boolean;
+  };
 }
 
 const PROCESSING_KEYS = ['echoCancellation', 'noiseSuppression', 'autoGainControl'] as const;
@@ -58,6 +72,27 @@ export function processingRow(key: string, settings: Record<string, unknown>, su
   return { label: key, value: sup, status: 'warn', note: 'Cannot confirm it is off on this device.' };
 }
 
+/** "2nd-order", "4th-order", ... for N cascaded 2nd-order sections. */
+export function filterOrder(stages: number): string {
+  const order = 2 * stages;
+  return `${order}${order === 2 ? 'nd' : 'th'}-order`;
+}
+
+export function formatDbfs(db: number | null): string {
+  return db === null || !Number.isFinite(db) ? 'n/a' : `${db.toFixed(1)} dBFS`;
+}
+
+/** Row describing the room noise floor. */
+export function noiseFloorRow(nf: NonNullable<ReportInput['noiseFloor']>): ReportRow {
+  if (nf.phase === 'measuring') return { label: 'Room noise floor', value: 'measuring...', status: 'info' };
+  return {
+    label: 'Room noise floor',
+    value: `${formatDbfs(nf.currentDb)} now, ${formatDbfs(nf.initialDb)} at start`,
+    status: nf.noisy ? 'warn' : 'ok',
+    note: nf.noisy ? 'Noisy room: try a quieter spot, away from fans/TV.' : undefined,
+  };
+}
+
 export function buildDeviceReport(input: ReportInput): ReportRow[] {
   const rows: ReportRow[] = [];
   rows.push({ label: 'Build', value: input.buildId, status: 'info' });
@@ -72,6 +107,10 @@ export function buildDeviceReport(input: ReportInput): ReportRow[] {
     status: input.isSecureContext ? 'ok' : 'bad',
     note: input.isSecureContext ? undefined : 'The microphone needs an https:// link.',
   });
+
+  if (input.highPassHz !== undefined) {
+    rows.push({ label: 'Analysis high-pass', value: `${input.highPassHz} Hz (${filterOrder(input.highPassStages ?? 1)}, meter/detection only)`, status: 'info' });
+  }
 
   const mic = input.mic;
   if (!mic) {
@@ -104,6 +143,8 @@ export function buildDeviceReport(input: ReportInput): ReportRow[] {
   if (trackRate !== undefined) rows.push({ label: 'Mic sample rate', value: `${String(trackRate)} Hz`, status: 'info' });
   const lat = mic.settings.latency;
   if (typeof lat === 'number') rows.push({ label: 'Mic latency (reported)', value: formatMs(lat), status: 'info' });
+
+  if (input.noiseFloor) rows.push(noiseFloorRow(input.noiseFloor));
 
   rows.push({
     label: 'Screen wake lock',

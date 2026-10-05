@@ -1,7 +1,7 @@
 # Tech
 
 > Owner: developer. Stack, folder structure, conventions, how to run and test.
-> Status: **Phase 0 in progress.** Plan approved by owner. Milestone 0.1 (mic + level meter) **built, pending owner phone test**.
+> Status: **Phase 0 in progress.** Plan approved by owner. Milestone 0.1 (mic + level meter) tested by owner on Pixel 10; **0.1.1 (room noise floor + high-pass) built, pending owner retest**.
 > Last updated: 2026-10-05
 
 **How to read this doc:** Sections marked **(Plain English)** are written for the owner. Sections marked **(Technical)** are for the developer. You can skip those without missing any decisions.
@@ -282,16 +282,29 @@ All commands run in `prototype/`. Node 20.19+ or 22 (CI uses 22).
 - The build ID shown in the page header (and in "Copy info") is the first 7 characters of `GITHUB_SHA`, or `dev` for local builds. Use it to confirm which version the owner has loaded.
 - `window.__micDebug.session` exposes the running `MicSession` in the browser console (debugging and smoke tests).
 - **Deploy:** `.github/workflows/deploy-prototype.yml` runs on push to `main` or `claude/gallant-archimedes-8jhys7` (when `prototype/**` or the workflow changes) and on manual dispatch: `npm ci`, `npm test`, `npm run build`, then deploys `prototype/dist` to GitHub Pages. One-time setup: Settings → Pages → Source: "GitHub Actions". To deploy from a non-default branch, that branch must also be allowed in Settings → Environments → `github-pages` → Deployment branches.
-- **Smoke test (manual, headless):** run `npm run preview`, then open it in Chromium with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`, tap Start, and check that "Frames processed" increases and the console has no errors. The fake device plays a full-scale beep, so the meter shows red/CLIP. That is expected.
+- **Smoke test (manual, headless):** run `npm run preview`, then open it in Chromium with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`, tap Start, and check that "Frames processed" increases, the "Stay quiet..." countdown ends with a "Room noise" number, and the console has no errors. The fake device plays a full-scale beep, so the meter shows red/CLIP. That is expected.
 
 ### Progress
 
 | Milestone | Status |
 |---|---|
-| 0.1 Mic + level meter | **Built 2026-10-05.** Unit tests and headless smoke test pass. **Pending owner test on Android Chrome** (meter responds to guitar, processing-off settings reported, lock/unlock resume, deploy link works). |
+| 0.1 Mic + level meter | **Built 2026-10-05.** Unit tests and headless smoke test pass. **Owner test, Pixel 10, Android Chrome (2026-10-05):** echoCancellation / noiseSuppression / autoGainControl all **off**, 48 kHz, mono, base latency 5 ms, mic latency (reported) 40 ms, no dropped blocks, deploy link works. Feedback: "the bar was always moving when I wasn't playing". Expected with processing off and a -60 dB meter scale; addressed in 0.1.1. Not yet reported: lock/unlock resume. |
+| 0.1.1 Room noise floor + analysis high-pass | **Built 2026-10-05.** 55 unit tests, typecheck, build and headless smoke test pass. **Pending owner retest on the Pixel 10** (does the bar stay grey / chip say "Quiet" when not playing, and go green on a strum? what "Room noise" value does the phone show?). |
 | 0.2–0.5 | Not started |
 
 **0.1 code map:** `src/audio/mic.ts` (getUserMedia with processing off, AudioContext created/resumed in the Start click, statechange/visibility handling with "Tap to resume", re-acquiring the mic if the track ended, Screen Wake Lock), `src/audio/capture.worklet.ts` (counts frames, posts sum-of-squares/peak/clip count every `blockSizeFrames`), `src/audio/errors.ts` (friendly error messages), `src/detection/config.ts` + `level.ts` (pure meter maths), `src/ui/meter.ts`, `src/ui/deviceReport.ts`, `src/main.ts`.
+
+**0.1.1 additions:** `src/detection/filters.ts` (biquad high-pass, pure), `src/detection/noiseFloor.ts` (quiet measurement + floor tracker, pure), tests in `test/filters.test.ts`, `test/noiseFloor.test.ts` (synthetic noise + 30 Hz rumble + 110 Hz burst, helpers in `test/signals.ts`).
+
+**Noise floor and high-pass (Plain English).** The mic hears the room all the time (fans, fridge, traffic) because we deliberately switch off the phone's noise suppression, which would also damage the guitar sound. Instead of hiding that noise, the meter now *measures* it. For 2 seconds after Start the screen says "Stay quiet..." and the app learns how loud your room is. After that, everything up to "room level + 6 dB" is drawn grey, and only sound clearly above the room lights up green/amber/red, with a big "Quiet" / "Sound!" label. Very low rumble (below the guitar's lowest string) is filtered out before measuring, so bumps, handling noise and mains hum don't move the meter. The raw recording is not changed by any of this. The measured room level will also be what strum detection (0.2) compares against.
+
+**Noise floor and high-pass (Technical).**
+- *Two paths in the worklet.* Raw input is never modified (clip detection now, recording in 0.2). The analysis path is the input through `analysisConfig.highPassStages` x 2nd-order Butterworth HPF at `analysisConfig.highPassHz` (70 Hz; RBJ biquad, TDF-II, state carried across 128-frame quanta). `LevelMessage` carries analysis `sumSquares`/`peak` plus `rawSumSquares`/`rawPeak`; `clipCount` is from the raw signal. Meter, peak hold and noise floor use the analysis path.
+- *Filter numbers (1 stage, 48 kHz):* -3 dB at 70 Hz, -1.8 dB at 82 Hz (low E), -0.7 dB at 110 Hz, -4.6 dB at 60 Hz, -6.8 dB at 50 Hz, -14.9 dB at 30 Hz. It weakens rumble, it does not remove it: rumble 17 dB above the noise still adds ~4.5 dB to the measured floor (tested). `highPassStages: 2` gives ~-29 dB at 30 Hz at the cost of ~2 dB more loss at 82 Hz.
+- *Initial floor:* `noiseFloorConfig.initialPercentile` (p90) of per-block (1024-frame, ~21 ms) analysis RMS in dBFS over `quietMeasureMs` (2 s). Clamped at `minDb` (-100), i.e. below the meter's -60 dB scale, so quiet phones get a real number.
+- *Tracker:* blocks are grouped into `trackWindowMs` (1 s) windows; the window's p90 moves the floor: down at up to `fallDbPerSec` (10), up at up to `riseDbPerSec` (0.5), and windows above floor + `ignoreAboveDb` (10) are ignored. So a strum during the quiet measurement is corrected within a few seconds, and playing never raises the floor. Trade-off: if the room suddenly gets >10 dB louder (e.g. a TV turns on) the tracker will not follow; the "Measure room again" button restarts the quiet measurement.
+- *Display:* "above room" = smoothed level > floor + `roomMarginDb` (6). Readouts "Room noise" (rounded dBFS) and "Above room" (level - floor). If the initial floor > `noisyRoomDb` (-35 dBFS) a "noisy room" hint is shown. Device info / Copy info gain "Analysis high-pass" and "Room noise floor" (now + at start).
+- *Headless note:* Chromium's fake mic is a periodic full-scale beep with digital silence in between, so the measured floor varies a lot run to run (-48 to -78 dBFS seen) and the chip mostly reads "Sound!". Only a real phone can judge the Quiet/Sound split.
 
 ---
 
