@@ -13,7 +13,7 @@ export function floatTo16(x: number): number {
  * Encodes mono float samples (one array or a list of chunks) as a 16-bit PCM WAV file.
  * Returns the complete file bytes.
  */
-export function encodeWav16(chunks: Float32Array | readonly Float32Array[], sampleRate: number): Uint8Array {
+export function encodeWav16(chunks: Float32Array | readonly Float32Array[], sampleRate: number): Uint8Array<ArrayBuffer> {
   const list = chunks instanceof Float32Array ? [chunks] : chunks;
   const frames = list.reduce((n, c) => n + c.length, 0);
   const dataBytes = frames * 2;

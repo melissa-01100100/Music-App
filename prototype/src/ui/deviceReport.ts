@@ -19,6 +19,9 @@ export interface ReportInput {
   uaBrands?: string;
   uaPlatform?: string;
   uaMobile?: boolean;
+  /** From userAgentData.getHighEntropyValues (Chrome only), e.g. "Pixel 10". */
+  uaModel?: string;
+  uaPlatformVersion?: string;
   isSecureContext: boolean;
   buildId: string;
   /** Present once the mic has started. */
@@ -42,6 +45,8 @@ export interface ReportInput {
   highPassHz?: number;
   /** Cascaded 2nd-order sections (order = 2 x stages). */
   highPassStages?: number;
+  /** One-line summary of the strum detector settings. */
+  onsetSummary?: string;
   /** Room noise floor (present once the mic has started). */
   noiseFloor?: {
     phase: 'measuring' | 'tracking';
@@ -100,6 +105,7 @@ export function buildDeviceReport(input: ReportInput): ReportRow[] {
   if (input.uaPlatform !== undefined) {
     rows.push({ label: 'Platform', value: `${input.uaPlatform}${input.uaMobile ? ' (mobile)' : ''}`, status: 'info' });
   }
+  if (input.uaModel) rows.push({ label: 'Device model', value: input.uaModel, status: 'info' });
   rows.push({ label: 'User agent', value: input.userAgent, status: 'info' });
   rows.push({
     label: 'Secure page (HTTPS)',
@@ -111,6 +117,8 @@ export function buildDeviceReport(input: ReportInput): ReportRow[] {
   if (input.highPassHz !== undefined) {
     rows.push({ label: 'Analysis high-pass', value: `${input.highPassHz} Hz (${filterOrder(input.highPassStages ?? 1)}, meter/detection only)`, status: 'info' });
   }
+
+  if (input.onsetSummary) rows.push({ label: 'Strum detector', value: input.onsetSummary, status: 'info' });
 
   const mic = input.mic;
   if (!mic) {
@@ -170,4 +178,23 @@ export function buildDeviceReport(input: ReportInput): ReportRow[] {
 /** Plain-text version for the "Copy info" button. */
 export function reportToText(rows: ReportRow[]): string {
   return rows.map((r) => `${r.label}: ${r.value}${r.status === 'bad' || r.status === 'warn' ? ` [${r.status}]` : ''}`).join('\n');
+}
+
+/** Short device description for exports, e.g. "Pixel 10, Android 16, Google Chrome 141". */
+export function shortDeviceName(input: Pick<ReportInput, 'uaModel' | 'uaPlatform' | 'uaPlatformVersion' | 'uaBrands' | 'userAgent'>): string {
+  const parts: string[] = [];
+  if (input.uaModel) parts.push(input.uaModel);
+  if (input.uaPlatform) parts.push(input.uaPlatformVersion ? `${input.uaPlatform} ${input.uaPlatformVersion.split('.')[0]}` : input.uaPlatform);
+  if (input.uaBrands) {
+    const brand = input.uaBrands.split(', ').find((b) => !/^Chromium /.test(b)) ?? input.uaBrands.split(', ')[0];
+    if (brand) parts.push(brand.replace(/(\d+)\..*$/, '$1'));
+  }
+  return parts.length ? parts.join(', ') : input.userAgent;
+}
+
+/** Rows as a plain object (label -> value) for JSON exports. */
+export function reportToObject(rows: ReportRow[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const r of rows) out[r.label] = r.value;
+  return out;
 }

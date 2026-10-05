@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#111418" />
     <link rel="icon" href="data:," />
-    <title>Chord Detect Prototype 0.1.1</title>
+    <title>Chord Detect Prototype 0.2</title>
   </head>
   <body>
     <main class="app">
       <header class="top">
-        <h1>Mic check</h1>
+        <h1>Strum check</h1>
         <span class="build" id="build"></span>
       </header>
 
@@ -25,8 +25,17 @@
 
       <button id="resume" class="big-btn resume" type="button" hidden>Tap to resume</button>
 
+      <section class="card strum-card" aria-label="Strums">
+        <div id="flash" class="flash" role="status" aria-live="polite">
+          <span class="flash-label">Strums</span>
+          <span id="strum-count" class="strum-count">0</span>
+        </div>
+        <p id="last-strum" class="last-strum">Waiting for the first strum…</p>
+        <button id="clear-strums" class="small-btn" type="button">Clear count and log</button>
+      </section>
+
       <section class="card meter-card" aria-label="Microphone level">
-        <div id="chip" class="chip off" role="status" aria-live="polite">Not listening</div>
+        <div id="chip" class="chip off">Not listening</div>
         <div class="readout">
           <span class="db" id="db">-- dB</span>
           <span class="clip" id="clip">CLIP</span>
@@ -48,6 +57,34 @@
         <p class="hint">The grey part of the bar is your room&rsquo;s background noise. Strum: the bar should go past the grey into green or amber. If it turns red, move the phone further away.</p>
         <button id="remeasure" class="small-btn" type="button" hidden>Measure room again</button>
       </section>
+
+      <section class="card rec-card" aria-label="Record">
+        <div class="info-head">
+          <h2>Record</h2>
+          <span id="rec-time" class="rec-time">0:00 / 2:00</span>
+        </div>
+        <button id="record" class="big-btn rec" type="button" disabled>Record</button>
+        <p id="rec-status" class="hint">Records the raw microphone sound (up to 2 minutes) plus the strums the app found, so the developer can test with your guitar.</p>
+        <button id="export" class="big-btn export" type="button" hidden>Share / save files</button>
+      </section>
+
+      <section class="card log-card" aria-label="Strum log">
+        <div class="info-head">
+          <h2>Strum log</h2>
+          <span class="small">time since Start · strength · above room</span>
+        </div>
+        <ol id="log" class="log"></ol>
+      </section>
+
+      <details class="card dev" id="dev">
+        <summary>Developer settings</summary>
+        <p class="hint">Changes apply immediately. Leave these alone unless we are troubleshooting together.</p>
+        <div id="sliders"></div>
+        <div class="dev-buttons">
+          <button id="dev-reset" class="small-btn" type="button">Reset to defaults</button>
+          <button id="dev-copy" class="small-btn" type="button">Copy settings</button>
+        </div>
+      </details>
 
       <section class="card info-card">
         <div class="info-head">

@@ -3,16 +3,18 @@
  * Runs inside the capture AudioWorklet, in Node tests and in tools/evaluate.ts.
  *
  * Feed it the ANALYSIS signal (after the 70 Hz high-pass) with `push(samples)`; it returns
- * the strums found so far. Pipeline per STFT frame (N = 1024, hop 256, Hann):
+ * the strums confirmed so far. Per STFT frame (N = 1024, hop 256, Hann):
  *   1. log-compressed magnitude  L[k] = log(1 + gamma * |X[k]| / (N/4))
- *   2. onset function odf = sum_k w[k] * max(0, L[k] - Lprev[k])   (weights favour high bins, sum w = 1)
+ *   2. onset function  odf = sum_k w[k] * max(0, L_t[k] - L_{t-lag}[k])
+ *      (half-wave-rectified spectral flux; weights favour high bins and sum to 1)
  *   3. peak picking: odf[p] is the max over [p - pre, p + lookahead] and
  *      odf[p] > delta + lambda * median(odf[p - medianWindow ... p + lookahead])
- *   4. level gate: frame RMS around the peak > room noise floor + minAboveRoomDb
- *   5. timestamp refinement: back over frames with odf > riseFraction * peak, then to the
- *      sample block where the attack envelope (energy of x[n] - x[n-1]) starts to rise
+ *   4. level gate (absolute floor): frame RMS around the peak > room noise floor + minAboveRoomDb
+ *   5. timestamp refinement: in the `refineSearchMs` before the end of the peak frame, the first
+ *      1 ms block where the attack envelope (energy of x[n] - x[n-1]) rises above
+ *      min + attackFraction * (max - min). That is the first string / pick noise of the strum.
  *   6. minimum inter-onset interval (the first strum wins)
- * Timestamps are sample indices of the stream (audio clock), never wall clock.
+ * Timestamps are sample indices of the analysed stream (audio clock), never wall clock.
  *
  * `push` allocates nothing in steady state except the returned event objects.
  */
@@ -32,17 +34,25 @@ export interface OnsetEvent {
 
 const NO_EVENTS: OnsetEvent[] = [];
 const ODF_RING = 512;
+/** Upper limits for time-based settings, so ring buffers can be sized once. */
+const MAX_LOOK_MS = 60;
+const MAX_SEARCH_MS = 80;
 
 export class OnsetDetector {
   readonly sampleRate: number;
+  /** Optional per-frame hook for tools/debugging: (frameIndex, odf, frameLevelDb). */
+  onFrame: ((frame: number, odf: number, levelDb: number) => void) | null = null;
+
   private cfg: OnsetConfig;
   private readonly n: number;
   private readonly hop: number;
+  private readonly lag: number;
   private readonly fft: FFT;
   private readonly win: Float64Array;
   private readonly re: Float64Array;
   private readonly im: Float64Array;
-  private readonly prevLog: Float64Array;
+  /** Log magnitudes of the last `lag + 1` frames (ring by frame index). */
+  private readonly logHist: Float64Array[];
   private readonly weights: Float64Array;
   private readonly kMin: number;
   private readonly kMax: number;
@@ -58,17 +68,14 @@ export class OnsetDetector {
   private readonly medianScratch = new Float64Array(ODF_RING);
   private readonly envScratch: Float64Array;
 
-  /** Optional per-frame hook for tools/debugging: (frameIndex, odf, frameLevelDb). */
-  onFrame: ((frame: number, odf: number, levelDb: number) => void) | null = null;
-
   private noiseFloorDb: number | null = null;
   private lastOnsetSample = -Infinity;
 
-  // Derived (in frames / samples), recomputed when settings change.
+  // Derived from settings (frames / samples).
   private preFrames = 0;
   private lookFrames = 0;
   private medianFrames = 0;
-  private backFrames = 0;
+  private searchSamples = 0;
   private minGapSamples = 0;
   private attackBlock = 1;
 
@@ -79,12 +86,13 @@ export class OnsetDetector {
     this.n = cfg.frameSizeSamples;
     this.hop = cfg.hopSizeSamples;
     if (!(this.hop > 0 && this.hop <= this.n)) throw new RangeError('hopSizeSamples must be in 1..frameSizeSamples');
+    this.lag = Math.max(1, Math.round(cfg.fluxLagFrames));
     this.fft = new FFT(this.n);
     this.win = hannWindow(this.n);
     this.re = new Float64Array(this.n);
     this.im = new Float64Array(this.n);
     const bins = this.n / 2 + 1;
-    this.prevLog = new Float64Array(bins);
+    this.logHist = Array.from({ length: this.lag + 1 }, () => new Float64Array(bins));
     const binHz = sampleRate / this.n;
     this.kMin = Math.max(1, Math.ceil(cfg.fluxMinHz / binHz));
     this.kMax = Math.min(bins - 1, Math.floor(Math.min(cfg.fluxMaxHz, sampleRate / 2) / binHz));
@@ -96,13 +104,11 @@ export class OnsetDetector {
       sumW += w;
     }
     for (let k = this.kMin; k <= this.kMax; k++) this.weights[k] /= sumW;
-    // Hann-windowed full-scale sine peaks at N/4: normalise so it reads 1.
+    // A Hann-windowed full-scale sine peaks at N/4: normalise so it reads 1.
     this.magNorm = this.n / 4;
 
     this.applyDerived();
-    const maxBack = Math.ceil((60 / 1000) * sampleRate / this.hop); // refineMaxBackMs is clamped to 60 ms
-    const maxLook = Math.ceil((60 / 1000) * sampleRate / this.hop);
-    const need = this.n + (maxBack + maxLook + 4) * this.hop;
+    const need = this.n + Math.ceil(((MAX_LOOK_MS + MAX_SEARCH_MS) / 1000) * sampleRate) + 4 * this.hop;
     let size = 8192;
     while (size < need) size <<= 1;
     this.ring = new Float32Array(size);
@@ -115,7 +121,7 @@ export class OnsetDetector {
     this.noiseFloorDb = db !== null && Number.isFinite(db) ? db : null;
   }
 
-  /** Live-tunable settings (Developer drawer). Takes effect from the next frame. */
+  /** Live-tunable settings (Developer drawer). Take effect from the next frame. */
   updateSettings(s: Partial<LiveOnsetSettings>): void {
     const next = { ...this.cfg };
     if (isNum(s.thresholdDelta)) next.thresholdDelta = Math.max(0, s.thresholdDelta);
@@ -135,23 +141,10 @@ export class OnsetDetector {
     return this.total;
   }
 
-  /** Clears all history (sample counter restarts at 0). Settings and noise floor are kept. */
-  reset(): void {
-    this.total = 0;
-    this.nextFrame = 0;
-    this.ring.fill(0);
-    this.prevLog.fill(0);
-    this.odf.fill(0);
-    this.level.fill(0);
-    this.lastOnsetSample = -Infinity;
-  }
-
   /** Feeds samples; returns strums confirmed during this call (usually none). */
   push(samples: ArrayLike<number>): OnsetEvent[] {
     let events: OnsetEvent[] = NO_EVENTS;
-    const n = this.n;
-    const hop = this.hop;
-    let due = this.nextFrame * hop + n;
+    let due = this.nextFrame * this.hop + this.n;
     for (let i = 0; i < samples.length; i++) {
       this.ring[this.total & this.mask] = samples[i];
       this.total++;
@@ -159,7 +152,7 @@ export class OnsetDetector {
         this.computeFrame(this.nextFrame);
         const ev = this.checkPeak(this.nextFrame - this.lookFrames);
         this.nextFrame++;
-        due += hop;
+        due += this.hop;
         if (ev) {
           if (events === NO_EVENTS) events = [];
           events.push(ev);
@@ -172,11 +165,11 @@ export class OnsetDetector {
   private applyDerived(): void {
     const c = this.cfg;
     const hopMs = (this.hop / this.sampleRate) * 1000;
-    const frames = (ms: number, max: number) => Math.min(max, Math.max(0, Math.round(ms / hopMs)));
-    this.preFrames = frames(c.peakPreMaxMs, 60);
-    this.lookFrames = frames(Math.min(c.peakLookaheadMs, 60), 60);
-    this.medianFrames = frames(c.medianWindowMs, ODF_RING - 70);
-    this.backFrames = frames(Math.min(c.refineMaxBackMs, 60), 60);
+    const frames = (ms: number, maxMs: number) => Math.max(0, Math.round(Math.min(ms, maxMs) / hopMs));
+    this.preFrames = frames(c.peakPreMaxMs, MAX_LOOK_MS);
+    this.lookFrames = frames(c.peakLookaheadMs, MAX_LOOK_MS);
+    this.medianFrames = Math.min(ODF_RING - 100, frames(c.medianWindowMs, 1e9));
+    this.searchSamples = Math.round((Math.min(MAX_SEARCH_MS, Math.max(1, c.refineSearchMs)) / 1000) * this.sampleRate);
     this.minGapSamples = Math.round((c.minInterOnsetMs / 1000) * this.sampleRate);
     this.attackBlock = Math.max(1, Math.round((c.attackBlockMs / 1000) * this.sampleRate));
   }
@@ -195,17 +188,18 @@ export class OnsetDetector {
     this.fft.forward(re, im);
     const gamma = this.cfg.logCompressionGamma;
     const norm = 1 / this.magNorm;
+    const cur = this.logHist[f % (this.lag + 1)];
+    const old = this.logHist[(f + 1) % (this.lag + 1)]; // = frame f - lag
     let flux = 0;
     for (let k = this.kMin; k <= this.kMax; k++) {
-      const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]) * norm;
-      const l = Math.log(1 + gamma * mag);
-      const d = l - this.prevLog[k];
+      const l = Math.log(1 + gamma * Math.sqrt(re[k] * re[k] + im[k] * im[k]) * norm);
+      const d = l - old[k];
       if (d > 0) flux += this.weights[k] * d;
-      this.prevLog[k] = l;
+      cur[k] = l;
     }
     const slot = f % ODF_RING;
-    // Frame 0 has no previous frame: its "flux" is just the level, not a change.
-    this.odf[slot] = f === 0 ? 0 : flux;
+    // The first `lag` frames have nothing to compare with.
+    this.odf[slot] = f < this.lag ? 0 : flux;
     this.level[slot] = 10 * Math.log10(sumSq / n + 1e-20);
     if (this.onFrame) this.onFrame(f, this.odf[slot], this.level[slot]);
   }
@@ -215,22 +209,22 @@ export class OnsetDetector {
   }
 
   private checkPeak(p: number): OnsetEvent | null {
-    if (p < 1) return null;
+    if (p < this.lag) return null;
     const v = this.odfAt(p);
     if (!(v > 0)) return null;
-    for (let j = Math.max(1, p - this.preFrames); j < p; j++) if (this.odfAt(j) >= v) return null;
+    for (let j = Math.max(0, p - this.preFrames); j < p; j++) if (this.odfAt(j) >= v) return null;
     for (let j = p + 1; j <= p + this.lookFrames; j++) if (this.odfAt(j) > v) return null;
 
     const c = this.cfg;
-    const threshold = c.thresholdDelta + c.thresholdLambda * this.medianOdf(Math.max(1, p - this.medianFrames), p + this.lookFrames);
-    if (v <= threshold) return null;
+    const median = this.medianOdf(Math.max(this.lag, p - this.medianFrames), p + this.lookFrames);
+    if (v <= c.thresholdDelta + c.thresholdLambda * median) return null;
 
     let levelDb = -Infinity;
     for (let j = p; j <= p + this.lookFrames; j++) levelDb = Math.max(levelDb, this.level[j % ODF_RING]);
     const floor = this.noiseFloorDb ?? c.fallbackNoiseFloorDb;
     if (levelDb < floor + c.minAboveRoomDb) return null;
 
-    const onset = this.refineOnset(p, v);
+    const onset = this.refineOnset(p);
     if (onset - this.lastOnsetSample < this.minGapSamples) return null;
     this.lastOnsetSample = onset;
     return { sampleIndex: onset, timeSec: onset / this.sampleRate, strength: v, levelDb };
@@ -254,23 +248,20 @@ export class OnsetDetector {
     return len % 2 ? s[mid] : 0.5 * (s[mid - 1] + s[mid]);
   }
 
-  /** Sample index where the strum's energy starts to rise (see file header, step 5). */
-  private refineOnset(p: number, peak: number): number {
-    const c = this.cfg;
-    let r = p;
-    const minR = Math.max(1, p - this.backFrames);
-    while (r - 1 >= minR && this.odfAt(r - 1) > c.refineRiseFraction * peak) r--;
-
-    const oldest = this.total - this.ring.length + 1;
-    const s0 = Math.max(1, (r - 1) * this.hop, oldest + 1);
-    const s1 = Math.min(this.total, p * this.hop + this.n);
+  /** Sample index where the strum's attack starts (see file header, step 5). */
+  private refineOnset(p: number): number {
+    const end = Math.min(this.total, p * this.hop + this.n);
+    const oldest = this.total - this.ring.length + 2;
+    const afterPrev = this.lastOnsetSample + this.minGapSamples;
+    const s0 = Math.max(1, oldest, end - this.searchSamples, Number.isFinite(afterPrev) ? afterPrev : 0);
     const blk = this.attackBlock;
-    const nBlocks = Math.floor((s1 - s0) / blk);
-    if (nBlocks < 2) return r * this.hop + this.n / 2;
+    const nBlocks = Math.floor((end - s0) / blk);
+    // Fallback: the Hann-weighted centre of the newest quarter of the peak frame.
+    if (nBlocks < 2) return Math.max(0, end - this.n / 4);
 
     const env = this.envScratch;
     const { ring, mask } = this;
-    let max = -1, argMax = 0, min = Infinity;
+    let max = -1, min = Infinity;
     for (let b = 0; b < nBlocks; b++) {
       let e = 0;
       const from = s0 + b * blk;
@@ -282,12 +273,12 @@ export class OnsetDetector {
         prev = x;
       }
       env[b] = e;
-      if (e > max) { max = e; argMax = b; }
+      if (e > max) max = e;
       if (e < min) min = e;
     }
-    const thr = min + c.attackFraction * (max - min);
-    let b = argMax;
-    while (b > 0 && env[b - 1] > thr) b--;
+    const thr = min + this.cfg.attackFraction * (max - min);
+    let b = 0;
+    while (b < nBlocks - 1 && env[b] <= thr) b++;
     return s0 + b * blk;
   }
 }

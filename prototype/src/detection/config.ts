@@ -110,6 +110,11 @@ export interface OnsetConfig {
   /** Lowest / highest frequency used in the flux sum. */
   fluxMinHz: number;
   fluxMaxHz: number;
+  /**
+   * Flux compares each frame with the frame this many hops earlier. 2 (~11 ms) collects the rise of a
+   * strum that hits the strings one after another over 20-40 ms into one clear peak.
+   */
+  fluxLagFrames: number;
   /** High-frequency (HFC-style) weighting: bin weight = 1 + hfcWeight * f / fluxMaxHz (then normalised). 0 = plain flux. */
   hfcWeight: number;
   /** Adaptive threshold: delta + lambda * median(odf over the window). Higher = less sensitive. */
@@ -127,13 +132,14 @@ export interface OnsetConfig {
   minAboveRoomDb: number;
   /** Floor used until the room has been measured (effectively "no level gate"). */
   fallbackNoiseFloorDb: number;
-  /** Timestamp refinement, step 1: walk back over frames whose flux is above this fraction of the peak. */
-  refineRiseFraction: number;
-  /** ... but no more than this far back. */
-  refineMaxBackMs: number;
-  /** Step 2: sample-level search on the attack envelope (energy of x[n]-x[n-1]) in blocks of this length. */
+  /**
+   * Timestamp refinement: search this far back from the newest sample of the peak frame for the
+   * start of the attack (clamped to 80 ms, and never before the previous strum + minimum gap).
+   */
+  refineSearchMs: number;
+  /** The search uses an attack envelope (energy of x[n]-x[n-1]) in blocks of this length. */
   attackBlockMs: number;
-  /** Onset = first block (walking back from the envelope maximum) above min + fraction*(max-min). */
+  /** Onset = first block in the search window above min + fraction * (max - min) of the envelope. */
   attackFraction: number;
 }
 
@@ -143,6 +149,7 @@ export const onsetConfig: OnsetConfig = {
   logCompressionGamma: 1000,
   fluxMinHz: 60,
   fluxMaxHz: 10000,
+  fluxLagFrames: 2,
   hfcWeight: 1,
   thresholdDelta: 0.1,
   thresholdLambda: 1.5,
@@ -152,10 +159,9 @@ export const onsetConfig: OnsetConfig = {
   minInterOnsetMs: 70,
   minAboveRoomDb: 10,
   fallbackNoiseFloorDb: -100,
-  refineRiseFraction: 0.5,
-  refineMaxBackMs: 30,
+  refineSearchMs: 50,
   attackBlockMs: 1,
-  attackFraction: 0.3,
+  attackFraction: 0.2,
 };
 
 /** Onset settings the Developer drawer may change live (no detector restart needed). */

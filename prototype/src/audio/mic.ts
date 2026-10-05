@@ -3,7 +3,7 @@
  * AudioContext lifecycle, capture worklet, wake lock, and a settings report.
  */
 import captureWorkletUrl from './capture.worklet.ts?worker&url';
-import { CAPTURE_PROCESSOR_NAME, type CaptureOptions, type WorkletMessage } from './messages';
+import { CAPTURE_PROCESSOR_NAME, type CaptureOptions, type ControlMessage, type WorkletMessage } from './messages';
 import { checkEnvironment, classifyMicError, makeMicError, type MicError } from './errors';
 
 /** Exactly what we ask the browser for. Processing must be OFF for guitar. */
@@ -111,6 +111,11 @@ export class MicSession {
     const session = new MicSession(ctx, stream, node, sink, cb);
     await session.requestWakeLock();
     return session;
+  }
+
+  /** Sends a control message to the capture worklet (settings, noise floor, record on/off). */
+  post(msg: ControlMessage): void {
+    this.node.port.postMessage(msg);
   }
 
   get track(): MediaStreamTrack {

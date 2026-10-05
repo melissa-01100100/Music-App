@@ -1,4 +1,5 @@
 /** Messages between the capture AudioWorklet and the main thread. */
+import type { LiveOnsetSettings, OnsetConfig } from '../detection/config';
 
 export const CAPTURE_PROCESSOR_NAME = 'capture-processor';
 
@@ -9,6 +10,10 @@ export interface CaptureOptions {
   highPassHz: number;
   /** Cascaded 2nd-order sections (1 = 12 dB/octave). */
   highPassStages: number;
+  /** Strum detector settings (runs in the worklet on the analysis signal). */
+  onset: OnsetConfig;
+  /** Raw-audio chunk size posted while recording. */
+  recordChunkFrames: number;
 }
 
 export interface LevelMessage {
@@ -33,4 +38,32 @@ export interface LevelMessage {
   emptyQuanta: number;
 }
 
-export type WorkletMessage = LevelMessage;
+/** A detected strum. sampleIndex is on the framesProcessed timeline (0 = first frame after Start). */
+export interface OnsetMessage {
+  type: 'onset';
+  sampleIndex: number;
+  strength: number;
+  levelDb: number;
+}
+
+/** Raw (unfiltered) mic audio while recording. `samples` is transferred, not copied. */
+export interface RawChunkMessage {
+  type: 'raw';
+  /** framesProcessed index of samples[0]. */
+  startFrame: number;
+  samples: Float32Array;
+}
+
+/** Sent after the last raw chunk once recording has been switched off. */
+export interface RecordStoppedMessage {
+  type: 'record-stopped';
+  endFrame: number;
+}
+
+export type WorkletMessage = LevelMessage | OnsetMessage | RawChunkMessage | RecordStoppedMessage;
+
+/** Main thread -> worklet. */
+export type ControlMessage =
+  | { type: 'onset-settings'; settings: Partial<LiveOnsetSettings> }
+  | { type: 'noise-floor'; db: number | null }
+  | { type: 'record'; on: boolean };

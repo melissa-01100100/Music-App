@@ -143,3 +143,42 @@ h2 { font-size: 1.1rem; margin: 0; }
   background: #3a2c10; color: var(--amber); line-height: 1.4;
 }
 #remeasure { margin-top: 10px; width: 100%; }
+
+/* ---- 0.2: strums, record, log, developer drawer ---- */
+.flash {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-height: 150px;
+  border-radius: 14px;
+  background: #222831;
+  transition: background-color 250ms ease-out, transform 250ms ease-out;
+}
+.flash.lit { background: var(--green); transition: none; transform: scale(1.03); }
+.flash.lit .flash-label, .flash.lit .strum-count { color: #06210f; }
+.flash-label { font-size: 1rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.strum-count { font-size: 4.5rem; line-height: 1; font-weight: 800; font-variant-numeric: tabular-nums; }
+.last-strum { margin: 10px 0; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
+#clear-strums { width: 100%; }
+
+.rec-time { font-variant-numeric: tabular-nums; color: var(--muted); }
+.rec { background: #8e2b2b; margin-top: 4px; }
+.rec.on { background: var(--red); animation: pulse 1.2s ease-in-out infinite; }
+.export { background: var(--blue); margin-top: 10px; font-size: 1.25rem; }
+
+.log {
+  list-style: none; margin: 0; padding: 0;
+  max-height: 240px; overflow-y: auto;
+  font-variant-numeric: tabular-nums; font-size: 0.95rem;
+}
+.log li { display: flex; justify-content: space-between; gap: 8px; padding: 6px 2px; border-top: 1px solid #2a3038; }
+.log li span:first-child { font-weight: 700; }
+.log li span { white-space: nowrap; }
+.log .muted { color: var(--muted); }
+
+.dev summary { font-size: 1.1rem; font-weight: 700; cursor: pointer; min-height: 32px; }
+.slider { margin-top: 14px; }
+.slider label { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
+.slider output { font-variant-numeric: tabular-nums; color: var(--amber); }
+.slider input[type='range'] { width: 100%; height: 36px; accent-color: var(--blue); }
+.slider .small { margin: 0; }
+.dev-buttons { display: flex; gap: 10px; margin-top: 14px; }
+.dev-buttons .small-btn { flex: 1; }
