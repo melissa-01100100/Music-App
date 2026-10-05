@@ -93,3 +93,96 @@ export const noiseFloorConfig: NoiseFloorConfig = {
   roomMarginDb: 6,
   noisyRoomDb: -35,
 };
+
+/**
+ * Strum (onset) detection. Spectral flux on log-compressed STFT magnitudes, optional
+ * high-frequency weighting, adaptive median threshold, peak picking, minimum gap, and a
+ * level gate tied to the room noise floor. See detection/onset.ts and TECH.md 2.2.
+ * "ODF units" = average rectified increase of log(1 + gamma*|X|) per analysed bin.
+ */
+export interface OnsetConfig {
+  /** STFT frame length (power of two). 1024 = ~21 ms at 48 kHz. */
+  frameSizeSamples: number;
+  /** STFT hop. 256 = ~5.3 ms at 48 kHz. */
+  hopSizeSamples: number;
+  /** Log compression log(1 + gamma*|X|), |X| normalised so a full-scale sine = 1. */
+  logCompressionGamma: number;
+  /** Lowest / highest frequency used in the flux sum. */
+  fluxMinHz: number;
+  fluxMaxHz: number;
+  /** High-frequency (HFC-style) weighting: bin weight = 1 + hfcWeight * f / fluxMaxHz (then normalised). 0 = plain flux. */
+  hfcWeight: number;
+  /** Adaptive threshold: delta + lambda * median(odf over the window). Higher = less sensitive. */
+  thresholdDelta: number;
+  thresholdLambda: number;
+  /** Past part of the median window (the lookahead is added on top). */
+  medianWindowMs: number;
+  /** Peak must be the maximum over this much time before it ... */
+  peakPreMaxMs: number;
+  /** ... and this much time after it. This is the added detection delay. */
+  peakLookaheadMs: number;
+  /** Two strums closer than this count as one (the first wins). 120 BPM sixteenths = 125 ms. */
+  minInterOnsetMs: number;
+  /** Absolute floor: the strum's frame level must be at least this far above the room noise floor. */
+  minAboveRoomDb: number;
+  /** Floor used until the room has been measured (effectively "no level gate"). */
+  fallbackNoiseFloorDb: number;
+  /** Timestamp refinement, step 1: walk back over frames whose flux is above this fraction of the peak. */
+  refineRiseFraction: number;
+  /** ... but no more than this far back. */
+  refineMaxBackMs: number;
+  /** Step 2: sample-level search on the attack envelope (energy of x[n]-x[n-1]) in blocks of this length. */
+  attackBlockMs: number;
+  /** Onset = first block (walking back from the envelope maximum) above min + fraction*(max-min). */
+  attackFraction: number;
+}
+
+export const onsetConfig: OnsetConfig = {
+  frameSizeSamples: 1024,
+  hopSizeSamples: 256,
+  logCompressionGamma: 1000,
+  fluxMinHz: 60,
+  fluxMaxHz: 10000,
+  hfcWeight: 1,
+  thresholdDelta: 0.1,
+  thresholdLambda: 1.5,
+  medianWindowMs: 100,
+  peakPreMaxMs: 16,
+  peakLookaheadMs: 16,
+  minInterOnsetMs: 70,
+  minAboveRoomDb: 10,
+  fallbackNoiseFloorDb: -100,
+  refineRiseFraction: 0.5,
+  refineMaxBackMs: 30,
+  attackBlockMs: 1,
+  attackFraction: 0.3,
+};
+
+/** Onset settings the Developer drawer may change live (no detector restart needed). */
+export type LiveOnsetSettings = Pick<OnsetConfig, 'thresholdDelta' | 'thresholdLambda' | 'minInterOnsetMs' | 'minAboveRoomDb'>;
+
+/** Raw-audio recording for the golden test set. */
+export interface RecordingConfig {
+  /** Recording stops by itself after this long (memory: ~23 MB of floats at 48 kHz). */
+  maxRecordSec: number;
+  /** The worklet posts raw audio to the main thread in chunks of this many frames while recording. */
+  chunkFrames: number;
+}
+
+export const recordingConfig: RecordingConfig = {
+  maxRecordSec: 120,
+  chunkFrames: 4096,
+};
+
+/** Strum display. */
+export interface StrumUiConfig {
+  /** How long the big flash stays lit after a strum. */
+  flashMs: number;
+  /** Event log keeps this many lines (newest first). */
+  logMaxLines: number;
+}
+
+export const strumUiConfig: StrumUiConfig = {
+  flashMs: 180,
+  logMaxLines: 200,
+};
