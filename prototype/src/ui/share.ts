@@ -1,6 +1,8 @@
 /**
- * Getting files off the phone: Web Share API with files (Android share sheet), falling back
- * to normal downloads. Android Chrome only shares an allow-list of file types: .wav is on it,
+ * Getting files off the phone. 0.3: the main path is "Save to device" (plain downloads: the original,
+ * bit-exact .wav lands in Downloads). Sharing stays as a second option, but apps such as WhatsApp
+ * re-encode audio shared into a chat (rec1 arrived as AAC), so the UI asks for the saved file instead.
+ * Share: Web Share API with files (Android share sheet), falling back to normal downloads. Android Chrome only shares an allow-list of file types: .wav is on it,
  * .json is not, so the JSON is offered as a .json.txt (text/plain) copy if needed.
  */
 
@@ -42,6 +44,14 @@ export async function shareOrDownload(wav: File, json: File, title: string): Pro
   await new Promise((r) => setTimeout(r, 400));
   download(json);
   return 'downloaded';
+}
+
+/** "Save to device": downloads the WAV, then the JSON (Android Chrome puts both in Downloads). */
+export async function saveFiles(wav: File, json: File): Promise<void> {
+  download(wav);
+  // Some browsers drop a second download started in the same tick.
+  await new Promise((r) => setTimeout(r, 400));
+  download(json);
 }
 
 function download(file: File): void {

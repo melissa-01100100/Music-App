@@ -5,7 +5,7 @@ import type { OnsetEvent } from '../src/detection/onset';
 import { onsetConfig } from '../src/detection/config';
 import { clampToSpec, formatSetting, SLIDERS } from '../src/ui/devSettings';
 import { pickShareSet } from '../src/ui/share';
-import { formatStrumRow } from '../src/ui/strumView';
+import { formatConfidence, formatScores, formatStrumRow } from '../src/ui/strumView';
 import { shortDeviceName } from '../src/ui/deviceReport';
 
 const ev = (sampleIndex: number, strength = 1, levelDb = -20): OnsetEvent => ({ sampleIndex, timeSec: sampleIndex / 48000, strength, levelDb });
@@ -48,6 +48,19 @@ describe('RecordingBuffer', () => {
     // Survives a JSON round trip (what tools/evaluate.ts reads).
     expect(JSON.parse(JSON.stringify(json)).events[1].timeSec).toBe(0.25);
   });
+
+  it('exports the chord, confidence and scores of each strum (0.3, formatVersion 2)', () => {
+    const r = new RecordingBuffer(48000, 48000 * 10);
+    r.add(new Float32Array(48000), 0);
+    const chord = { chord: 'C', best: 'C', confidence: 0.81234, scores: { Am: 0.71111, C: 0.93333, G: 0.3, D: 0.2 } };
+    const json = buildRecordingJson(r, [{ ...ev(24000), chord }, { ...ev(36000), chord: { ...chord, chord: '?' } }], {
+      build: 'v0.3 · test', device: 'SM-S9210', deviceInfo: {}, recordedAt: new Date(0),
+      noiseFloorDbAtStart: null, noiseFloorDbAtEnd: null, config: {},
+    });
+    expect(json.formatVersion).toBe(2);
+    expect(json.events[0]).toMatchObject({ chord: 'C', chordBest: 'C', confidence: 0.812, scores: { Am: 0.711, C: 0.933 } });
+    expect(json.events[1].chord).toBe('?');
+  });
 });
 
 describe('export helpers', () => {
@@ -80,8 +93,12 @@ describe('export helpers', () => {
 
 describe('strum log and developer sliders', () => {
   it('formats a log row', () => {
-    expect(formatStrumRow({ timeSec: 12.3456, strength: 0.8765, aboveRoomDb: 23.6 })).toEqual(['12.346 s', 'strength 0.88', '+24 dB']);
-    expect(formatStrumRow({ timeSec: 1, strength: 1, aboveRoomDb: null })[2]).toBe('room ?');
+    expect(formatStrumRow({ timeSec: 12.3456, strength: 0.8765, aboveRoomDb: 23.6 })).toEqual(['12.346 s', '', 'strength 0.88', '+24 dB']);
+    expect(formatStrumRow({ timeSec: 1, strength: 1, aboveRoomDb: null })[3]).toBe('room ?');
+    expect(formatStrumRow({ timeSec: 1, strength: 1, aboveRoomDb: 5, chord: 'G', confidence: 0.876 })[1]).toBe('G 88%');
+    expect(formatStrumRow({ timeSec: 1, strength: 1, aboveRoomDb: 5, chord: '?', confidence: 0.2 })[1]).toBe('?');
+    expect(formatScores({ Am: 0.1234, C: 0.9 })).toBe('Am 0.12 · C 0.90');
+    expect(formatConfidence(1.4)).toBe('100%');
   });
 
   it('defaults sit inside the slider ranges, and values are clamped to the grid', () => {

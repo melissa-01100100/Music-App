@@ -161,6 +161,22 @@ h2 { font-size: 1.1rem; margin: 0; }
 .last-strum { margin: 10px 0; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
 #clear-strums { width: 100%; }
 
+/* ---- 0.3: chord name ---- */
+.chord-name { font-size: 5.5rem; line-height: 1; font-weight: 800; letter-spacing: -0.02em; }
+.chord-name.unsure { color: var(--amber); }
+.chord-conf { font-size: 1.1rem; font-weight: 700; margin-top: 4px; min-height: 1.4em; font-variant-numeric: tabular-nums; }
+.strum-count-row { margin-top: 6px; color: var(--muted); font-size: 0.95rem; }
+.strum-count-row .strum-count { font-size: 0.95rem; font-weight: 800; }
+.flash.lit .chord-name, .flash.lit .chord-conf, .flash.lit .strum-count-row { color: #06210f; }
+.chord-scores { margin: 8px 0 0; text-align: center; color: var(--muted); font-size: 0.85rem; min-height: 1.2em; font-variant-numeric: tabular-nums; }
+.log .chord { font-weight: 800; min-width: 4.5em; }
+.log .chord.unsure { color: var(--amber); }
+.save-hint { margin: 8px 0 0; font-size: 0.9rem; line-height: 1.4; padding: 8px 10px; border-radius: 10px; background: #1d2a1f; color: var(--text); }
+.export-row { display: flex; gap: 8px; margin-top: 10px; }
+.export-row[hidden] { display: none; }
+.export-row .big-btn { flex: 1; margin: 0; min-height: 60px; }
+.export-row #save { flex: 1.6; }
+
 .rec-time { font-variant-numeric: tabular-nums; color: var(--muted); }
 .rec { background: #8e2b2b; margin-top: 4px; }
 .rec.on { background: var(--red); animation: pulse 1.2s ease-in-out infinite; }
@@ -238,3 +254,4 @@ h2 { font-size: 1.1rem; margin: 0; }
 .string-chip.current { border-color: #fff; }
 .string-chip.locked { outline: 3px solid var(--blue); outline-offset: 2px; }
 .tuner-hz { text-align: center; margin: 6px 0 0; font-variant-numeric: tabular-nums; }
+.big-btn.secondary { background: #2a3038; font-size: 1.25rem; }

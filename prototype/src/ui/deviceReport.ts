@@ -58,6 +58,10 @@ export interface ReportInput {
     initialDb: number | null;
     /** Initial floor is above the "noisy room" threshold. */
     noisy: boolean;
+    /** 0.3: the quiet measurement never got steady (playing during it); a low percentile was used. */
+    unsteady?: boolean;
+    /** 0.3: seconds of digital silence (exact zeros) ignored so far. */
+    digitalSilenceSec?: number;
   };
 }
 
@@ -94,9 +98,16 @@ export function noiseFloorRow(nf: NonNullable<ReportInput['noiseFloor']>): Repor
   if (nf.phase === 'measuring') return { label: 'Room noise floor', value: 'measuring...', status: 'info' };
   return {
     label: 'Room noise floor',
-    value: `${formatDbfs(nf.currentDb)} now, ${formatDbfs(nf.initialDb)} at start`,
-    status: nf.noisy ? 'warn' : 'ok',
-    note: nf.noisy ? 'Noisy room: try a quieter spot, away from fans/TV.' : undefined,
+    value:
+      `${formatDbfs(nf.currentDb)} now, ${formatDbfs(nf.initialDb)} at start` +
+      (nf.unsteady ? ' (not steady: sound during the measurement)' : '') +
+      (nf.digitalSilenceSec ? ` · ${nf.digitalSilenceSec.toFixed(1)} s of digital silence ignored` : ''),
+    status: nf.noisy || nf.unsteady ? 'warn' : 'ok',
+    note: nf.noisy
+      ? 'Noisy room: try a quieter spot, away from fans/TV.'
+      : nf.unsteady
+        ? 'Tap "Measure room again" and keep the guitar still for 2 seconds.'
+        : undefined,
   };
 }
 

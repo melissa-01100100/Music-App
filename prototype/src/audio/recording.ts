@@ -5,6 +5,28 @@
  */
 import type { OnsetEvent } from '../detection/onset';
 
+/** Chord result attached to a strum for the export (0.3). `chord` is "?" when unsure. */
+export interface StrumChord {
+  chord: string;
+  best: string;
+  confidence: number;
+  scores: Record<string, number>;
+}
+
+/** A strum as the app keeps it: the onset plus (once classified) its chord. */
+export type StrumRecord = OnsetEvent & { chord?: StrumChord };
+
+export interface ExportedStrum {
+  timeSec: number;
+  strength: number;
+  levelDb: number;
+  sampleIndex: number;
+  chord?: string;
+  chordBest?: string;
+  confidence?: number;
+  scores?: Record<string, number>;
+}
+
 export class RecordingBuffer {
   readonly chunks: Float32Array[] = [];
   /** Stream frame index (worklet framesProcessed timeline) of the first recorded sample. */
@@ -40,17 +62,26 @@ export class RecordingBuffer {
   }
 
   /** Detected strums inside the recording, with times relative to the recording start. */
-  eventsInside(events: readonly OnsetEvent[]): { timeSec: number; strength: number; levelDb: number; sampleIndex: number }[] {
+  eventsInside(events: readonly StrumRecord[]): ExportedStrum[] {
     if (this.startFrame === null) return [];
     const start = this.startFrame;
     return events
       .filter((e) => e.sampleIndex >= start && e.sampleIndex < this.endFrame)
-      .map((e) => ({
-        timeSec: round((e.sampleIndex - start) / this.sampleRate, 6),
-        strength: round(e.strength, 4),
-        levelDb: round(e.levelDb, 1),
-        sampleIndex: e.sampleIndex - start,
-      }));
+      .map((e) => {
+        const out: ExportedStrum = {
+          timeSec: round((e.sampleIndex - start) / this.sampleRate, 6),
+          strength: round(e.strength, 4),
+          levelDb: round(e.levelDb, 1),
+          sampleIndex: e.sampleIndex - start,
+        };
+        if (e.chord) {
+          out.chord = e.chord.chord;
+          out.chordBest = e.chord.best;
+          out.confidence = round(e.chord.confidence, 3);
+          out.scores = Object.fromEntries(Object.entries(e.chord.scores).map(([k, v]) => [k, round(v, 3)]));
+        }
+        return out;
+      });
   }
 }
 
@@ -69,10 +100,11 @@ export interface RecordingMeta {
 }
 
 /** JSON that goes next to the WAV. Close to the draft label format in TECH.md section 5. */
-export function buildRecordingJson(rec: RecordingBuffer, events: readonly OnsetEvent[], meta: RecordingMeta) {
+export function buildRecordingJson(rec: RecordingBuffer, events: readonly StrumRecord[], meta: RecordingMeta) {
   return {
     format: 'chord-detect-recording',
-    formatVersion: 1,
+    /** 2 (0.3): events carry chord, chordBest, confidence, scores. */
+    formatVersion: 2,
     sampleRate: rec.sampleRate,
     device: meta.device,
     build: meta.build,
@@ -82,7 +114,7 @@ export function buildRecordingJson(rec: RecordingBuffer, events: readonly OnsetE
     audio: 'raw mic input (before the 70 Hz analysis high-pass), mono, 16-bit PCM WAV',
     noiseFloorDb: meta.noiseFloorDbAtStart === null ? null : round(meta.noiseFloorDbAtStart, 1),
     noiseFloorDbAtEnd: meta.noiseFloorDbAtEnd === null ? null : round(meta.noiseFloorDbAtEnd, 1),
-    eventsAre: 'detected by the app (not hand-checked); times in seconds from the start of the WAV',
+    eventsAre: 'detected by the app (not hand-checked); times in seconds from the start of the WAV; chord "?" = unsure',
     config: meta.config,
     deviceInfo: meta.deviceInfo,
     events: rec.eventsInside(events),

@@ -13,8 +13,14 @@
  *   5. timestamp refinement: in the `refineSearchMs` before the end of the peak frame, the first
  *      1 ms block where the attack envelope (energy of x[n] - x[n-1]) rises above
  *      min + attackFraction * (max - min). That is the first string / pick noise of the strum.
- *   6. minimum inter-onset interval (the first strum wins)
+ *   6. strum merging (0.3): candidate peaks within `minInterOnsetMs` of the first candidate are one
+ *      strum (a slow strum gives one peak per string or two). The strum is emitted once no later
+ *      candidate can join; its time is the first candidate within `strumLevelSpanDb` of the loudest
+ *      one, its strength/level the maximum. A candidate `splitStrengthRatio` x stronger than the
+ *      first starts a new strum.
  * Timestamps are sample indices of the analysed stream (audio clock), never wall clock.
+ * Because of step 6 a strum is reported ~minInterOnsetMs + refineSearchMs after its onset
+ * (~160 ms by default); the timestamp is not affected. Call `flush()` at the end of a file.
  *
  * `push` allocates nothing in steady state except the returned event objects.
  */
@@ -34,6 +40,8 @@ export interface OnsetEvent {
 
 const NO_EVENTS: OnsetEvent[] = [];
 const ODF_RING = 512;
+/** Most candidates kept for one strum (more are folded into the last slot's maximum). */
+const MAX_CANDIDATES = 16;
 /** Upper limits for time-based settings, so ring buffers can be sized once. */
 const MAX_LOOK_MS = 60;
 const MAX_SEARCH_MS = 80;
@@ -69,7 +77,15 @@ export class OnsetDetector {
   private readonly envScratch: Float64Array;
 
   private noiseFloorDb: number | null = null;
+  /** Onset of the newest candidate (open strum or emitted). */
   private lastOnsetSample = -Infinity;
+  /** Onset of the last emitted strum. */
+  private lastEmittedSample = -Infinity;
+  // Candidates of the strum being merged (count 0 = none open).
+  private candCount = 0;
+  private readonly candOnset = new Float64Array(MAX_CANDIDATES);
+  private readonly candLevel = new Float64Array(MAX_CANDIDATES);
+  private readonly candStrength = new Float64Array(MAX_CANDIDATES);
 
   // Derived from settings (frames / samples).
   private preFrames = 0;
@@ -150,16 +166,77 @@ export class OnsetDetector {
       this.total++;
       if (this.total === due) {
         this.computeFrame(this.nextFrame);
-        const ev = this.checkPeak(this.nextFrame - this.lookFrames);
+        const p = this.nextFrame - this.lookFrames;
+        const ev = this.checkPeak(p);
+        // Once a candidate from a later frame could no longer fall inside the window, the strum is complete.
+        const done = this.candCount > 0 && (p + 1) * this.hop + this.n - this.searchSamples >= this.candOnset[0] + this.minGapSamples;
+        const closed = ev ?? (done ? this.closeStrum() : null);
         this.nextFrame++;
         due += this.hop;
-        if (ev) {
+        if (closed) {
           if (events === NO_EVENTS) events = [];
-          events.push(ev);
+          events.push(closed);
         }
       }
     }
     return events;
+  }
+
+  /** Emits the strum still being merged (end of a file). Live use never needs this. */
+  flush(): OnsetEvent[] {
+    const ev = this.closeStrum();
+    return ev ? [ev] : [];
+  }
+
+  /** Adds a candidate peak; returns a completed strum if this candidate closed the previous one. */
+  private addCandidate(onset: number, strength: number, levelDb: number): OnsetEvent | null {
+    let closed: OnsetEvent | null = null;
+    if (this.candCount > 0) {
+      const inWindow = onset - this.candOnset[0] < this.minGapSamples;
+      const ratio = this.cfg.splitStrengthRatio;
+      const split = ratio > 0 && strength >= ratio * this.candStrength[0];
+      if (inWindow && !split) {
+        const i = Math.min(this.candCount, MAX_CANDIDATES - 1);
+        if (i === this.candCount) {
+          this.candOnset[i] = onset;
+          this.candLevel[i] = levelDb;
+          this.candStrength[i] = strength;
+          this.candCount++;
+        } else {
+          this.candLevel[i] = Math.max(this.candLevel[i], levelDb);
+          this.candStrength[i] = Math.max(this.candStrength[i], strength);
+        }
+        this.lastOnsetSample = onset;
+        return null;
+      }
+      closed = this.closeStrum();
+    }
+    this.candOnset[0] = onset;
+    this.candLevel[0] = levelDb;
+    this.candStrength[0] = strength;
+    this.candCount = 1;
+    this.lastOnsetSample = onset;
+    return closed;
+  }
+
+  private closeStrum(): OnsetEvent | null {
+    const n = this.candCount;
+    if (n === 0) return null;
+    this.candCount = 0;
+    let maxLevel = -Infinity, maxStrength = 0;
+    for (let i = 0; i < n; i++) {
+      maxLevel = Math.max(maxLevel, this.candLevel[i]);
+      maxStrength = Math.max(maxStrength, this.candStrength[i]);
+    }
+    let onset = this.candOnset[0];
+    for (let i = 0; i < n; i++) {
+      if (this.candLevel[i] >= maxLevel - this.cfg.strumLevelSpanDb) {
+        onset = this.candOnset[i];
+        break;
+      }
+    }
+    this.lastEmittedSample = onset;
+    return { sampleIndex: onset, timeSec: onset / this.sampleRate, strength: maxStrength, levelDb: maxLevel };
   }
 
   private applyDerived(): void {
@@ -225,9 +302,9 @@ export class OnsetDetector {
     if (levelDb < floor + c.minAboveRoomDb) return null;
 
     const onset = this.refineOnset(p);
-    if (onset - this.lastOnsetSample < this.minGapSamples) return null;
-    this.lastOnsetSample = onset;
-    return { sampleIndex: onset, timeSec: onset / this.sampleRate, strength: v, levelDb };
+    // A candidate too close after an already emitted strum belongs to it (its tail).
+    if (this.candCount === 0 && onset - this.lastEmittedSample < this.minGapSamples) return null;
+    return this.addCandidate(onset, v, levelDb);
   }
 
   private medianOdf(from: number, to: number): number {
@@ -252,7 +329,9 @@ export class OnsetDetector {
   private refineOnset(p: number): number {
     const end = Math.min(this.total, p * this.hop + this.n);
     const oldest = this.total - this.ring.length + 2;
-    const afterPrev = this.lastOnsetSample + this.minGapSamples;
+    // Never before the previous candidate of this strum, nor inside the window of the last emitted strum.
+    const afterPrev =
+      this.candCount > 0 ? this.lastOnsetSample + this.attackBlock : this.lastEmittedSample + this.minGapSamples;
     const s0 = Math.max(1, oldest, end - this.searchSamples, Number.isFinite(afterPrev) ? afterPrev : 0);
     const blk = this.attackBlock;
     const nBlocks = Math.floor((end - s0) / blk);
@@ -261,7 +340,7 @@ export class OnsetDetector {
 
     const env = this.envScratch;
     const { ring, mask } = this;
-    let max = -1, min = Infinity;
+    let max = -1;
     for (let b = 0; b < nBlocks; b++) {
       let e = 0;
       const from = s0 + b * blk;
@@ -274,12 +353,28 @@ export class OnsetDetector {
       }
       env[b] = e;
       if (e > max) max = e;
-      if (e < min) min = e;
     }
-    const thr = min + this.cfg.attackFraction * (max - min);
+    const base = this.baseline(nBlocks);
+    const thr = base + this.cfg.attackFraction * (max - base);
     let b = 0;
     while (b < nBlocks - 1 && env[b] <= thr) b++;
     return s0 + b * blk;
+  }
+
+  /** Median of the attack envelope over the first part of the search window (sorts a scratch copy). */
+  private baseline(nBlocks: number): number {
+    const m = Math.max(1, Math.round(nBlocks * this.cfg.refineBaselineFraction));
+    const s = this.medianScratch.length >= m ? this.medianScratch : new Float64Array(m);
+    for (let i = 0; i < m; i++) {
+      const x = this.envScratch[i];
+      let j = i;
+      while (j > 0 && s[j - 1] > x) {
+        s[j] = s[j - 1];
+        j--;
+      }
+      s[j] = x;
+    }
+    return m % 2 ? s[m >> 1] : 0.5 * (s[(m >> 1) - 1] + s[m >> 1]);
   }
 }
 

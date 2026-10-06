@@ -77,18 +77,80 @@ describe('NoiseFloorEstimator', () => {
     expect(est.remainingMs).toBe(cfg.quietMeasureMs);
   });
 
-  it('clamps silence (-Infinity) to minDb', () => {
+  it('ignores digital silence (exact zeros) while measuring and tracking; clamps very quiet rooms to minDb', () => {
     const est = new NoiseFloorEstimator(cfg);
     for (let i = 0; i < 200; i++) est.addBlock(-Infinity, BLOCK_MS);
+    expect(est.state).toBe('measuring'); // zeros are not a quiet room
+    expect(est.digitalSilenceMs).toBeGreaterThan(4000);
+    for (let i = 0; i < 100; i++) est.addBlock(-55 + (i % 3), BLOCK_MS);
+    expect(est.floorDb).toBeCloseTo(-53, 0);
+    // Rec1 (Galaxy S24): long stretches of exact zeros (mic muted in the background) used to drag the
+    // floor to the -100 dBFS clamp. Now 30 s of zeros leaves it alone.
+    for (let i = 0; i < Math.ceil(30000 / BLOCK_MS); i++) est.addBlock(-Infinity, BLOCK_MS);
+    expect(est.floorDb).toBeCloseTo(-53, 0);
+    for (let i = 0; i < Math.ceil(30000 / BLOCK_MS); i++) est.addBlock(-130, BLOCK_MS);
+    expect(est.floorDb).toBeCloseTo(-53, 0);
+    // A genuinely very quiet mic is clamped at minDb (-90), never lower.
+    for (let i = 0; i < Math.ceil(30000 / BLOCK_MS); i++) est.addBlock(-105, BLOCK_MS);
     expect(est.floorDb).toBe(cfg.minDb);
+    expect(cfg.minDb).toBe(-90);
+  });
+
+  it('measures again if the player strums during the quiet measurement, then uses a low percentile', () => {
+    const strumming = (i: number) => (i % 35 < 5 ? -15 : -15 - (i % 35) * 1.2); // strum every ~0.75 s, decaying
+    const est = new NoiseFloorEstimator(cfg);
+    let i = 0;
+    while (!est.retrying) est.addBlock(strumming(i++), BLOCK_MS);
+    expect(est.state).toBe('measuring');
+    expect(est.remainingMs).toBe(cfg.quietMeasureMs);
+    // Quiet now: the repeated measurement gives the real room.
+    let done = false;
+    while (!done) done = est.addBlock(-60 + (i++ % 4), BLOCK_MS);
+    expect(est.retrying).toBe(false);
+    expect(est.unsteadyStart).toBe(false);
+    expect(est.floorDb).toBeLessThan(-56);
+
+    // Never quiet: after the retries it settles on a low percentile instead of the p90 (~-17 dB).
+    const est2 = new NoiseFloorEstimator(cfg);
+    let j = 0;
+    done = false;
+    while (!done) done = est2.addBlock(strumming(j++), BLOCK_MS);
+    expect(j * BLOCK_MS).toBeGreaterThanOrEqual((cfg.maxQuietRetries + 1) * cfg.quietMeasureMs);
+    expect(est2.unsteadyStart).toBe(true);
+    expect(est2.floorDb).toBeLessThanOrEqual(cfg.unsteadyMaxFloorDb);
+  });
+
+  it('continuous strumming (small spread, but far too loud for a room) is not taken as the room either', () => {
+    // rec1 replayed as a fake mic: strums every ~0.75 s with ringing strings, blocks -9..-21 dBFS.
+    const ringing = (i: number) => -9 - (i % 35) * 0.35;
+    const est = new NoiseFloorEstimator(cfg);
+    let i = 0;
+    let done = false;
+    let sawRetry = false;
+    while (!done) {
+      done = est.addBlock(ringing(i++), BLOCK_MS);
+      sawRetry ||= est.retrying;
+    }
+    expect(sawRetry).toBe(true);
+    expect(est.unsteadyStart).toBe(true);
+    expect(est.floorDb).toBe(cfg.unsteadyMaxFloorDb);
   });
 
   it('falls quickly when the first measurement was too loud (someone strummed during it)', () => {
     const est = new NoiseFloorEstimator(cfg);
-    for (let i = 0; i < 100; i++) est.addBlock(-20, BLOCK_MS);
-    expect(est.floorDb).toBeCloseTo(-20);
+    // -20 dBFS is far too loud for a room: measured again twice, then capped at unsteadyMaxFloorDb.
+    let done = false;
+    while (!done) done = est.addBlock(-20, BLOCK_MS);
+    expect(est.floorDb).toBe(cfg.unsteadyMaxFloorDb);
     for (let i = 0; i < Math.ceil(5000 / BLOCK_MS); i++) est.addBlock(-60, BLOCK_MS);
     expect(est.floorDb).toBeCloseTo(-60);
+    // A steady, fairly noisy -40 dBFS room (quieter than maxQuietDb) is accepted at the first try.
+    const est2 = new NoiseFloorEstimator(cfg);
+    done = false;
+    let blocks = 0;
+    while (!done) { done = est2.addBlock(-40, BLOCK_MS); blocks++; }
+    expect(blocks * BLOCK_MS).toBeLessThan(cfg.quietMeasureMs + 2 * BLOCK_MS);
+    expect(est2.floorDb).toBeCloseTo(-40);
   });
 
   it('rises only slowly when the room gets a bit louder', () => {

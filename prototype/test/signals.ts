@@ -96,3 +96,44 @@ export function strumTrack(opts: {
   });
   return out;
 }
+
+/**
+ * Synthetic strummed chord from exact MIDI notes: each string a decaying harmonic series
+ * (`partials`, 1/h amplitudes with brighter decay), strings started `spreadMs` apart (down-strum
+ * order), optional detune in cents, per-string gains (e.g. weak bass on a phone mic), and a short
+ * noisy pick attack per string.
+ */
+export function strummedChord(opts: {
+  notes: readonly number[];
+  n: number;
+  sampleRate?: number;
+  amplitude?: number;
+  spreadMs?: number;
+  detuneCents?: number;
+  stringGains?: readonly number[];
+  partials?: number;
+  seed?: number;
+}): Float32Array {
+  const sr = opts.sampleRate ?? SR;
+  const r = rng(opts.seed ?? 1);
+  const out = new Float32Array(opts.n);
+  const amp = opts.amplitude ?? 0.05;
+  const partials = opts.partials ?? 8;
+  opts.notes.forEach((midi, s) => {
+    const f0 = 440 * 2 ** ((midi - 69 + (opts.detuneCents ?? 0) / 100) / 12);
+    const start = Math.round((s * (opts.spreadMs ?? 5) * sr) / 1000);
+    const g = (opts.stringGains?.[s] ?? 1) * amp;
+    for (let h = 1; h <= partials; h++) {
+      const f = f0 * h;
+      if (f >= sr / 2) break;
+      const a = (g / h) * (0.7 + 0.6 * r());
+      const tau = 1.2 / (1 + 0.4 * (h - 1));
+      const ph = r() * 2 * Math.PI;
+      const w = (2 * Math.PI * f) / sr;
+      for (let i = start; i < opts.n; i++) out[i] += a * Math.exp(-(i - start) / sr / tau) * Math.sin(w * (i - start) + ph);
+    }
+    const atk = Math.min(opts.n - start, Math.round(0.01 * sr));
+    for (let i = 0; i < atk; i++) out[start + i] += 0.3 * g * (r() * 2 - 1) * Math.exp(-i / sr / 0.002);
+  });
+  return out;
+}

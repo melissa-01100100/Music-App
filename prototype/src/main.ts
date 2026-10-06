@@ -1,6 +1,7 @@
 import './style.css';
 import {
   analysisConfig,
+  chordConfig,
   levelConfig,
   noiseFloorConfig,
   onsetConfig,
@@ -12,13 +13,13 @@ import {
 } from './detection/config';
 import { initialMeterState, rms, toDbfs, updateMeter, type MeterState } from './detection/level';
 import { isNoisyRoom, NoiseFloorEstimator } from './detection/noiseFloor';
-import type { OnsetEvent } from './detection/onset';
+import { ChordClassifier } from './detection/classifier';
 import { PitchTracker, type PitchFrame } from './detection/pitch';
 import { TunerSmoother } from './detection/tuner';
 import { MicSession } from './audio/mic';
 import { classifyMicError, type MicError } from './audio/errors';
-import type { LevelMessage, WorkletMessage } from './audio/messages';
-import { buildRecordingJson, fileStamp, formatClock, RecordingBuffer } from './audio/recording';
+import type { LevelMessage, OnsetMessage, WorkletMessage } from './audio/messages';
+import { buildRecordingJson, fileStamp, formatClock, RecordingBuffer, type StrumRecord } from './audio/recording';
 import { encodeWav16 } from './audio/wav';
 import { createMeterView } from './ui/meter';
 import {
@@ -31,7 +32,7 @@ import {
 } from './ui/deviceReport';
 import { createStrumView } from './ui/strumView';
 import { createDevDrawer } from './ui/devDrawer';
-import { shareOrDownload } from './ui/share';
+import { saveFiles, shareOrDownload } from './ui/share';
 import { createTunerView, tunerSummary, type TunerPhase } from './ui/tunerView';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
@@ -57,6 +58,9 @@ const ui = {
   recTime: $('rec-time'),
   recStatus: $('rec-status'),
   export: $<HTMLButtonElement>('export'),
+  save: $<HTMLButtonElement>('save'),
+  exportRow: $('export-row'),
+  saveHint: $('save-hint'),
   clearStrums: $<HTMLButtonElement>('clear-strums'),
   devReset: $<HTMLButtonElement>('dev-reset'),
   devCopy: $<HTMLButtonElement>('dev-copy'),
@@ -70,6 +74,9 @@ const ui = {
 
 const strumView = createStrumView({
   flash: $('flash'),
+  chord: $('chord-name'),
+  confidence: $('chord-conf'),
+  scores: $('chord-scores'),
   count: $('strum-count'),
   last: $('last-strum'),
   log: $('log') as HTMLOListElement,
@@ -90,7 +97,7 @@ const meterView = createMeterView({
   scale: $('scale'),
 });
 
-const BUILD = `v0.2.1 · ${__BUILD_ID__} · ${__BUILD_TIME__}`;
+const BUILD = `v0.3 · ${__BUILD_ID__} · ${__BUILD_TIME__}`;
 ui.build.textContent = BUILD;
 
 // ---- state ----
@@ -115,8 +122,11 @@ const DEFAULT_LIVE: LiveOnsetSettings = {
 };
 let liveSettings: LiveOnsetSettings = { ...DEFAULT_LIVE };
 const currentOnsetConfig = (): OnsetConfig => ({ ...onsetConfig, ...liveSettings });
-/** Every strum since Start (also used to fill the recording's JSON). */
-const strums: OnsetEvent[] = [];
+/** Every strum since Start, with its chord (also used to fill the recording's JSON). */
+const strums: StrumRecord[] = [];
+// Chord classification (0.3) runs here on the main thread, on the ~160 ms of audio each strum message carries.
+const chordClassifier = new ChordClassifier(chordConfig);
+let chordMsTotal = 0;
 
 // Mode + tuner (0.2.1). Pitch detection runs on the main thread on analysis audio the worklet
 // streams only while the tuner is open (TECH.md 2.6). The strum detector keeps running in the worklet.
@@ -167,7 +177,7 @@ function onWorkletMessage(msg: WorkletMessage): void {
     case 'level':
       return onLevel(msg);
     case 'onset':
-      return onOnset(msg.sampleIndex, msg.strength, msg.levelDb);
+      return onOnset(msg);
     case 'raw':
       if (rec && rec.add(msg.samples, msg.startFrame) && recState === 'recording') stopRecording();
       return;
@@ -216,14 +226,23 @@ function tunerPhase(): TunerPhase {
   return noiseFloor.state === 'measuring' ? 'measuring' : 'listening';
 }
 
-function onOnset(sampleIndex: number, strength: number, levelDb: number): void {
+function onOnset(msg: OnsetMessage): void {
   if (!session) return;
-  const ev: OnsetEvent = { sampleIndex, timeSec: sampleIndex / session.ctx.sampleRate, strength, levelDb };
+  const { sampleIndex, strength, levelDb } = msg;
+  const sr = session.ctx.sampleRate;
+  const floor = noiseFloor.floorDb;
+  const t0 = performance.now();
+  const r = chordClassifier.classify(msg.audio, 0, sr, floor);
+  chordMsTotal += performance.now() - t0;
+  const chord = { chord: r.chord ?? '?', best: r.best, confidence: r.confidence, scores: r.scores };
+  const ev: StrumRecord = { sampleIndex, timeSec: sampleIndex / sr, strength, levelDb, chord };
   strums.push(ev);
   // Plucks while tuning stay in the recording's event list but don't count on the strum screen.
   if (mode !== 'strum') return;
-  const floor = noiseFloor.floorDb;
-  strumView.add({ timeSec: ev.timeSec, strength, aboveRoomDb: floor === null ? null : levelDb - floor }, performance.now());
+  strumView.add(
+    { timeSec: ev.timeSec, strength, aboveRoomDb: floor === null ? null : levelDb - floor, chord: chord.chord, confidence: chord.confidence, scores: chord.scores },
+    performance.now(),
+  );
 }
 
 /** Keeps the worklet's level gate in step with the room floor (sent only when it changes). */
@@ -241,10 +260,9 @@ function onLevel(msg: LevelMessage): void {
   pending.push(msg);
   // Noise floor works per block (not per animation frame), on the high-passed signal.
   if (session && msg.count > 0) {
-    const blockDb = toDbfs(Math.sqrt(msg.sumSquares / msg.count), noiseFloorConfig.minDb);
-    const wasMeasuring = noiseFloor.state === 'measuring';
-    noiseFloor.addBlock(blockDb, (msg.count / session.ctx.sampleRate) * 1000);
-    if (wasMeasuring && noiseFloor.initialFloorDb !== null) onQuietMeasured();
+    // Unclamped: exact zeros (-Infinity) are digital silence, which the estimator ignores.
+    const blockDb = msg.sumSquares > 0 ? 10 * Math.log10(msg.sumSquares / msg.count) : -Infinity;
+    if (noiseFloor.addBlock(blockDb, (msg.count / session.ctx.sampleRate) * 1000)) onQuietMeasured();
     syncFloor();
   }
   framesProcessed = msg.framesProcessed;
@@ -283,6 +301,7 @@ function frame(now: number): void {
     floorDb: noiseFloor.floorDb,
     measuring: !!session && noiseFloor.state === 'measuring',
     remainingMs: noiseFloor.remainingMs,
+    retrying: noiseFloor.retrying,
   });
 
   strumView.tick(now);
@@ -336,6 +355,8 @@ function reportInput(now: number): ReportInput {
       currentDb: noiseFloor.floorDb,
       initialDb: noiseFloor.initialFloorDb,
       noisy: isNoisyRoom(noiseFloor.initialFloorDb, noiseFloorConfig.noisyRoomDb),
+      unsteady: noiseFloor.unsteadyStart,
+      digitalSilenceSec: noiseFloor.digitalSilenceMs / 1000,
     };
   }
   return input;
@@ -366,7 +387,9 @@ function rowEl(r: ReportRow): HTMLTableRowElement {
 
 function onsetSummary(): string {
   const c = liveSettings;
-  return `in audio worklet · δ ${c.thresholdDelta.toFixed(2)}, λ ${c.thresholdLambda.toFixed(1)}, gap ${c.minInterOnsetMs} ms, room +${c.minAboveRoomDb} dB · ${strums.length} strums`;
+  const named = strums.filter((s) => s.chord && s.chord.chord !== '?').length;
+  const avg = strums.length ? (chordMsTotal / strums.length).toFixed(1) : '-';
+  return `in audio worklet · δ ${c.thresholdDelta.toFixed(2)}, λ ${c.thresholdLambda.toFixed(1)}, merge ${c.minInterOnsetMs} ms, room +${c.minAboveRoomDb} dB · ${strums.length} strums (${named} named, chord ${chordConfig.chordWindowStartMs}-${chordConfig.chordWindowEndMs} ms, ${avg} ms each)`;
 }
 
 // ---- errors / status ----
@@ -389,7 +412,9 @@ function updateResumeButton(): void {
     ui.status.textContent = needs
       ? 'Audio paused (screen locked or app switched). Tap to resume.'
       : noiseFloor.state === 'measuring'
-        ? 'Measuring your room. Stay quiet and keep the guitar still.'
+        ? noiseFloor.retrying
+          ? 'Please stay quiet — measuring again. We heard sound during the room measurement; keep the guitar still for 2 seconds.'
+          : 'Measuring your room. Stay quiet and keep the guitar still.'
         : mode === 'tuner'
           ? 'Listening. Pluck one string at a time.'
           : 'Listening. Strum your guitar.';
@@ -430,6 +455,7 @@ ui.start.addEventListener('click', async () => {
         onset: currentOnsetConfig(),
         recordChunkFrames: recordingConfig.chunkFrames,
         tapChunkFrames: pitchConfig.hopSamples,
+        strumAudioMs: chordConfig.chordWindowEndMs,
       },
       { onMessage: onWorkletMessage, onChange: () => renderInfo(performance.now()) },
     );
@@ -489,7 +515,8 @@ function startRecording(): void {
   session.post({ type: 'record', on: true });
   ui.record.textContent = 'Stop';
   ui.record.classList.add('on');
-  ui.export.hidden = true;
+  ui.exportRow.hidden = true;
+  ui.saveHint.hidden = true;
   ui.recStatus.textContent = 'Recording… play as you normally would. Tap Stop when done (it stops by itself after 2 minutes).';
 }
 
@@ -512,8 +539,9 @@ function onRecordingStopped(): void {
     return;
   }
   ui.recTime.textContent = `${formatClock(rec.durationSec)} / ${formatClock(recordingConfig.maxRecordSec)}`;
-  ui.export.hidden = false;
-  ui.recStatus.textContent = `Recorded ${rec.durationSec.toFixed(1)} s. Tap "Share / save files" to send it.`;
+  ui.exportRow.hidden = false;
+  ui.saveHint.hidden = false;
+  ui.recStatus.textContent = `Recorded ${rec.durationSec.toFixed(1)} s. Tap "Save to device" to keep the original files.`;
 }
 
 function buildExportFiles(): { wav: File; json: File; strumsInside: number } | null {
@@ -527,7 +555,7 @@ function buildExportFiles(): { wav: File; json: File; strumsInside: number } | n
     recordedAt: recStartedAt,
     noiseFloorDbAtStart: recFloorAtStart,
     noiseFloorDbAtEnd: recFloorAtEnd,
-    config: { onset: currentOnsetConfig(), analysis: analysisConfig, noiseFloor: noiseFloorConfig },
+    config: { onset: currentOnsetConfig(), analysis: analysisConfig, noiseFloor: noiseFloorConfig, chord: chordConfig },
   };
   const data = buildRecordingJson(rec, strums, meta);
   const wavBytes = encodeWav16(rec.chunks, rec.sampleRate);
@@ -543,6 +571,23 @@ ui.record.addEventListener('click', () => {
   else if (recState === 'idle' || recState === 'ready') startRecording();
 });
 
+ui.save.addEventListener('click', async () => {
+  const files = buildExportFiles();
+  if (!files) return;
+  ui.save.disabled = true;
+  try {
+    await saveFiles(files.wav, files.json);
+    const sizeMb = (files.wav.size / 1e6).toFixed(1);
+    ui.recStatus.textContent = `Saved ${files.wav.name} (${sizeMb} MB) and the .json with ${files.strumsInside} strums to Downloads. Attach both files from Files → Downloads.`;
+    console.info('[export] saved', files.wav.name, files.wav.size, 'bytes');
+  } catch (err) {
+    ui.recStatus.textContent = `Save failed: ${String(err)}`;
+    console.warn('[export] save failed', err);
+  } finally {
+    ui.save.disabled = false;
+  }
+});
+
 ui.export.addEventListener('click', async () => {
   const files = buildExportFiles();
   if (!files) return;
@@ -553,7 +598,9 @@ ui.export.addEventListener('click', async () => {
     ui.recStatus.textContent =
       result === 'cancelled'
         ? 'Sharing cancelled. Tap the button again to retry.'
-        : `${result === 'downloaded' ? 'Downloaded' : 'Shared'} ${files.wav.name} (${sizeMb} MB) and the .json with ${files.strumsInside} strums.`;
+        : result === 'downloaded'
+          ? `Downloaded ${files.wav.name} (${sizeMb} MB) and the .json with ${files.strumsInside} strums.`
+          : `Shared ${files.wav.name} (${sizeMb} MB) and the .json with ${files.strumsInside} strums. Chat apps may re-compress the audio: "Save to device" keeps the original.`;
     console.info('[export]', result, files.wav.name, files.wav.size, 'bytes');
   } catch (err) {
     ui.recStatus.textContent = `Export failed: ${String(err)}`;
@@ -610,6 +657,9 @@ requestAnimationFrame(frame);
   },
   get settings() {
     return liveSettings;
+  },
+  get chords() {
+    return { classified: strums.filter((s) => s.chord).length, avgMs: strums.length ? chordMsTotal / strums.length : 0, last: strums[strums.length - 1]?.chord ?? null };
   },
   get tuner() {
     return {

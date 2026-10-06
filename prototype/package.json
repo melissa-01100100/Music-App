@@ -1,8 +1,8 @@
 {
   "name": "chord-detect-prototype",
   "private": true,
-  "version": "0.2.1",
-  "description": "Phase 0 audio detection prototype (strum detection + recording + tuner, milestone 0.2.1)",
+  "version": "0.3.0",
+  "description": "Phase 0 audio detection prototype (strum detection + chord classification + recording + tuner, milestone 0.3)",
   "type": "module",
   "engines": {
     "node": ">=20.19"

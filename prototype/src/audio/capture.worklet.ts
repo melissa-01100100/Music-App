@@ -9,15 +9,16 @@
  *
  * Why the onset detector runs here (TECH.md 2.5): it is cheap (one 1024-point FFT every
  * 256 frames, ~1% of the audio thread on a desktop), it sees every sample in order with the
- * exact frame count, and it cannot be delayed by UI work on the main thread. Only small event
- * messages cross threads.
+ * exact frame count, and it cannot be delayed by UI work on the main thread. Each strum message
+ * carries the strum's chord window of analysis audio (~160 ms, transferred); the chord itself is
+ * classified on the main thread (TECH.md 2.7), so the heavier 8192-point FFT never runs here.
  *
  * Bundled by Vite via `?worker&url` (see mic.ts) so it works in production builds.
  */
 import { accumulateStats, emptyStats, type BlockStats } from '../detection/level';
 import { Biquad, highPassCoeffs } from '../detection/filters';
 import { onsetConfig } from '../detection/config';
-import { OnsetDetector } from '../detection/onset';
+import { StrumTracker } from '../detection/strum';
 import {
   CAPTURE_PROCESSOR_NAME,
   type AnalysisChunkMessage,
@@ -41,7 +42,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
   private readonly blockSize: number;
   private readonly clipThreshold: number;
   private readonly hpf: Biquad[];
-  private readonly detector: OnsetDetector;
+  private readonly tracker: StrumTracker;
   private readonly recordChunkFrames: number;
   private scratch = new Float32Array(128);
   private raw: BlockStats = emptyStats();
@@ -67,15 +68,15 @@ class CaptureProcessor extends AudioWorkletProcessor {
     this.clipThreshold = opts.clipThreshold ?? 0.99;
     const coeffs = highPassCoeffs(opts.highPassHz ?? 70, sampleRate);
     this.hpf = Array.from({ length: Math.max(1, opts.highPassStages ?? 1) }, () => new Biquad(coeffs));
-    this.detector = new OnsetDetector(sampleRate, opts.onset ?? onsetConfig);
+    this.tracker = new StrumTracker(sampleRate, opts.onset ?? onsetConfig, opts.strumAudioMs ?? 160);
     this.recordChunkFrames = opts.recordChunkFrames ?? 4096;
     this.tapChunkFrames = opts.tapChunkFrames ?? 1024;
     this.port.onmessage = (e: MessageEvent<ControlMessage>) => this.onControl(e.data);
   }
 
   private onControl(msg: ControlMessage): void {
-    if (msg.type === 'onset-settings') this.detector.updateSettings(msg.settings);
-    else if (msg.type === 'noise-floor') this.detector.setNoiseFloorDb(msg.db);
+    if (msg.type === 'onset-settings') this.tracker.detector.updateSettings(msg.settings);
+    else if (msg.type === 'noise-floor') this.tracker.detector.setNoiseFloorDb(msg.db);
     else if (msg.type === 'tap') {
       this.tapping = msg.on;
       this.tapChunk = null;
@@ -109,10 +110,10 @@ class CaptureProcessor extends AudioWorkletProcessor {
     if (this.tapping) this.tap(this.scratch);
 
     // The detector's sample counter equals framesProcessed (both start at 0 and see every frame).
-    const events = this.detector.push(this.scratch);
-    for (const ev of events) {
-      const msg: OnsetMessage = { type: 'onset', sampleIndex: ev.sampleIndex, strength: ev.strength, levelDb: ev.levelDb };
-      this.port.postMessage(msg);
+    const strums = this.tracker.push(this.scratch);
+    for (const { event: ev, audio } of strums) {
+      const msg: OnsetMessage = { type: 'onset', sampleIndex: ev.sampleIndex, strength: ev.strength, levelDb: ev.levelDb, audio };
+      this.port.postMessage(msg, [audio.buffer]);
     }
 
     accumulateStats(this.raw, channel, this.clipThreshold);

@@ -74,3 +74,52 @@ export function minGapSec(timesSec: readonly number[]): number {
   for (let i = 1; i < t.length; i++) g = Math.min(g, t[i] - t[i - 1]);
   return g;
 }
+
+export interface ChordScore {
+  /** Labelled strums matched to a detection (within the tolerance). */
+  matched: number;
+  correct: number;
+  /** Matched, but the detector said "?" (null). */
+  unsure: number;
+  /** Matched and named a different chord. */
+  wrong: number;
+  /** correct / matched. */
+  accuracy: number;
+  /** "expected>detected" -> count, for the wrong and unsure ones (detected "?" when unsure). */
+  confusions: Record<string, number>;
+}
+
+/** Chord accuracy on the strums both labelled and detected (same greedy time matching as scoreOnsets). */
+export function scoreChords(
+  detected: readonly { timeSec: number; chord: string | null }[],
+  expected: readonly { timeSec: number; chord: string }[],
+  toleranceSec = 0.05,
+): ChordScore {
+  const det = [...detected].sort((a, b) => a.timeSec - b.timeSec);
+  const used = new Array<boolean>(det.length).fill(false);
+  const out: ChordScore = { matched: 0, correct: 0, unsure: 0, wrong: 0, accuracy: NaN, confusions: {} };
+  for (const e of [...expected].sort((a, b) => a.timeSec - b.timeSec)) {
+    let best = -1;
+    let bestDist = Infinity;
+    det.forEach((d, j) => {
+      const dist = Math.abs(d.timeSec - e.timeSec);
+      if (!used[j] && dist <= toleranceSec && dist < bestDist) {
+        best = j;
+        bestDist = dist;
+      }
+    });
+    if (best < 0) continue;
+    used[best] = true;
+    out.matched++;
+    const got = det[best].chord;
+    if (got === e.chord) out.correct++;
+    else {
+      if (got === null || got === '?') out.unsure++;
+      else out.wrong++;
+      const key = `${e.chord}>${got ?? '?'}`;
+      out.confusions[key] = (out.confusions[key] ?? 0) + 1;
+    }
+  }
+  out.accuracy = out.matched ? out.correct / out.matched : NaN;
+  return out;
+}

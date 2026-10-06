@@ -16,6 +16,8 @@ export interface CaptureOptions {
   recordChunkFrames: number;
   /** Analysis-audio chunk size posted while the tuner tap is on (0.2.1). */
   tapChunkFrames?: number;
+  /** Analysis audio sent with each strum, from its onset (0.3: the chord window end). */
+  strumAudioMs?: number;
 }
 
 export interface LevelMessage {
@@ -40,12 +42,17 @@ export interface LevelMessage {
   emptyQuanta: number;
 }
 
-/** A detected strum. sampleIndex is on the framesProcessed timeline (0 = first frame after Start). */
+/**
+ * A detected strum. sampleIndex is on the framesProcessed timeline (0 = first frame after Start).
+ * Sent once the chord window has been captured; `audio` (transferred) is the high-passed analysis
+ * signal from the onset to onset + strumAudioMs, for the chord classifier on the main thread.
+ */
 export interface OnsetMessage {
   type: 'onset';
   sampleIndex: number;
   strength: number;
   levelDb: number;
+  audio: Float32Array;
 }
 
 /** Raw (unfiltered) mic audio while recording. `samples` is transferred, not copied. */

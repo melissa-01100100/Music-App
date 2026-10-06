@@ -13,6 +13,8 @@ export interface RoomInfo {
   measuring: boolean;
   /** Countdown for the quiet measurement. */
   remainingMs: number;
+  /** The previous quiet measurement heard playing/talking and is being repeated. */
+  retrying?: boolean;
 }
 
 export interface MeterView {
@@ -78,7 +80,8 @@ export function createMeterView(root: MeterElements): MeterView {
       if (!active) {
         setChip(root.chip, 'off', 'Not listening');
       } else if (room.measuring) {
-        setChip(root.chip, 'measuring', `Stay quiet… ${Math.max(1, Math.ceil(room.remainingMs / 1000))}`);
+        const secs = Math.max(1, Math.ceil(room.remainingMs / 1000));
+        setChip(root.chip, 'measuring', room.retrying ? `Please stay quiet — measuring again… ${secs}` : `Stay quiet… ${secs}`);
       } else if (above) {
         setChip(root.chip, 'sound', 'Sound!');
       } else {

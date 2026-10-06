@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#111418" />
     <link rel="icon" href="data:," />
-    <title>Chord Detect Prototype 0.2.1</title>
+    <title>Chord Detect Prototype 0.3</title>
   </head>
   <body>
     <main class="app">
@@ -53,9 +53,12 @@
 
       <section id="strum-card" class="card strum-card" aria-label="Strums">
         <div id="flash" class="flash" role="status" aria-live="polite">
-          <span class="flash-label">Strums</span>
-          <span id="strum-count" class="strum-count">0</span>
+          <span id="chord-name" class="chord-name">–</span>
+          <span id="chord-conf" class="chord-conf"></span>
+          <span class="strum-count-row">Strums: <span id="strum-count" class="strum-count">0</span></span>
         </div>
+        <p id="chord-scores" class="chord-scores" aria-label="Score per chord"></p>
+        <p class="hint">Strum Am, C, G or D. The big letters show the chord the app heard; “?” means it is not sure.</p>
         <p id="last-strum" class="last-strum">Waiting for the first strum…</p>
         <button id="clear-strums" class="small-btn" type="button">Clear count and log</button>
       </section>
@@ -91,13 +94,17 @@
         </div>
         <button id="record" class="big-btn rec" type="button" disabled>Record</button>
         <p id="rec-status" class="hint">Records the raw microphone sound (up to 2 minutes) plus the strums the app found, so the developer can test with your guitar.</p>
-        <button id="export" class="big-btn export" type="button" hidden>Share / save files</button>
+        <div id="export-row" class="export-row" hidden>
+          <button id="save" class="big-btn export" type="button">Save to device</button>
+          <button id="export" class="big-btn secondary" type="button">Share…</button>
+        </div>
+        <p id="save-hint" class="save-hint" hidden>Please send the developer the <b>original .wav file</b>: tap <b>Save to device</b>, then attach the file from <b>Files → Downloads</b> (as a document/file). Sharing it into a chat as audio (e.g. WhatsApp) re-compresses the sound and loses detail.</p>
       </section>
 
       <section id="log-card" class="card log-card" aria-label="Strum log">
         <div class="info-head">
           <h2>Strum log</h2>
-          <span class="small">time since Start · strength · above room</span>
+          <span class="small">time · chord · strength · above room</span>
         </div>
         <ol id="log" class="log"></ol>
       </section>

@@ -1,9 +1,15 @@
 /**
  * Room noise floor estimation. Pure (no DOM, no Web Audio), unit tested.
  *
+ * 0. Digital silence (blocks below `digitalSilenceDb`, i.e. exact zeros) is ignored everywhere:
+ *    it is a muted/stalled mic, not a quiet room.
  * 1. Quiet measurement: for `quietMeasureMs` right after Start the player stays quiet.
  *    The initial floor is a high percentile (default p90) of the per-block RMS in dBFS,
  *    so it sits at the top of normal room-noise wobble rather than its average.
+ *    If the blocks spread more than `maxQuietSpreadDb` (p90 - p10: someone played) or the median
+ *    is louder than `maxQuietDb` (continuous strumming), the measurement is repeated up to
+ *    `maxQuietRetries` times (`retrying` is true, so the UI can say "Please stay quiet — measuring
+ *    again"); after that a low percentile capped at `unsteadyMaxFloorDb` is used instead.
  * 2. Tracking: afterwards the floor follows the room slowly. Blocks are grouped into
  *    windows (`trackWindowMs`); each window's percentile level moves the floor:
  *      - quieter window  -> floor falls quickly (`fallDbPerSec`),
@@ -49,22 +55,42 @@ export class NoiseFloorEstimator {
   private windowMs = 0;
   private floor: number | null = null;
   private initial: number | null = null;
+  private retries = 0;
+  private unsteady = false;
+  private silentMs = 0;
 
   constructor(private readonly cfg: NoiseFloorConfig) {}
 
-  /** Adds one block's RMS level (dBFS) lasting `blockMs`. */
-  addBlock(levelDb: number, blockMs: number): void {
-    const db = Math.max(this.cfg.minDb, Number.isFinite(levelDb) ? levelDb : this.cfg.minDb);
+  /**
+   * Adds one block's RMS level (dBFS, unclamped: -Infinity for exact zeros) lasting `blockMs`.
+   * Returns true if this block finished the quiet measurement.
+   */
+  addBlock(levelDb: number, blockMs: number): boolean {
+    if (!(levelDb >= this.cfg.digitalSilenceDb)) {
+      this.silentMs += blockMs;
+      return false;
+    }
+    const db = Math.max(this.cfg.minDb, levelDb);
     if (this.phase === 'measuring') {
       this.quietBlocks.push(db);
       this.elapsedMs += blockMs;
-      if (this.elapsedMs >= this.cfg.quietMeasureMs) {
-        this.initial = percentile(this.quietBlocks, this.cfg.initialPercentile);
-        this.floor = this.initial;
+      if (this.elapsedMs < this.cfg.quietMeasureMs) return false;
+      const spread = percentile(this.quietBlocks, 90) - percentile(this.quietBlocks, 10);
+      const unsteady = spread > this.cfg.maxQuietSpreadDb || percentile(this.quietBlocks, 50) > this.cfg.maxQuietDb;
+      if (unsteady && this.retries < this.cfg.maxQuietRetries) {
+        this.retries++;
         this.quietBlocks = [];
-        this.phase = 'tracking';
+        this.elapsedMs = 0;
+        return false;
       }
-      return;
+      this.unsteady = unsteady;
+      this.initial = unsteady
+        ? Math.min(this.cfg.unsteadyMaxFloorDb, percentile(this.quietBlocks, this.cfg.unsteadyPercentile))
+        : percentile(this.quietBlocks, this.cfg.initialPercentile);
+      this.floor = this.initial;
+      this.quietBlocks = [];
+      this.phase = 'tracking';
+      return true;
     }
     this.windowBlocks.push(db);
     this.windowMs += blockMs;
@@ -74,6 +100,7 @@ export class NoiseFloorEstimator {
       this.windowBlocks = [];
       this.windowMs = 0;
     }
+    return false;
   }
 
   /** Starts a fresh quiet measurement (e.g. "Measure room again"). */
@@ -85,6 +112,23 @@ export class NoiseFloorEstimator {
     this.windowMs = 0;
     this.floor = null;
     this.initial = null;
+    this.retries = 0;
+    this.unsteady = false;
+  }
+
+  /** True while a repeated quiet measurement is running (the previous one heard playing/talking). */
+  get retrying(): boolean {
+    return this.phase === 'measuring' && this.retries > 0;
+  }
+
+  /** True if the room never measured steady and the floor came from `unsteadyPercentile`. */
+  get unsteadyStart(): boolean {
+    return this.unsteady;
+  }
+
+  /** Total digital-silence time ignored since construction (diagnostics). */
+  get digitalSilenceMs(): number {
+    return this.silentMs;
   }
 
   get state(): NoiseFloorPhase {

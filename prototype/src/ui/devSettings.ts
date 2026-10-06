@@ -27,8 +27,8 @@ export const SLIDERS: readonly SliderSpec[] = [
   },
   {
     key: 'minInterOnsetMs',
-    label: 'Minimum gap between strums',
-    help: 'Two strums closer than this count as one. Fast down-up strumming needs it well below 125 ms.',
+    label: 'Strum merge window',
+    help: 'Sounds closer than this to the start of a strum count as the same strum (a slow strum hits the strings over ~100 ms). Fast down-up strumming (125 ms apart) needs it below 125 ms.',
     min: 30, max: 200, step: 5, unit: ' ms', decimals: 0,
   },
   {

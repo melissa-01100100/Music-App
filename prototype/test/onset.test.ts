@@ -105,6 +105,49 @@ describe('onset detector: synthetic strums', () => {
     expect(s.maxAbsErrorMs).toBeLessThan(10);
   });
 
+  // rec1 (Galaxy S24): a slow strum gave one onset-function peak per string or two, ~70-100 ms apart,
+  // and the 0.2 detector (first wins, 70 ms gap) reported most strums twice.
+  it('gives one event for a SLOW strum (six strings over 100 ms, getting louder)', () => {
+    const times = irregularTimes(12, 2.5).map((t, i) => t + i * 0.3);
+    const x = noise(0.003, Math.round((times[times.length - 1] + 2) * SR), 21);
+    const strings = [82.4, 110, 146.8, 196, 246.9, 329.6];
+    times.forEach((t, i) => {
+      strings.forEach((f, s) => mixAt(x, pluck(f, 0.02 * (1 + s * 0.6), SR, 2000 + i * 10 + s), Math.round((t + s * 0.02) * SR)));
+    });
+    const ev = detect(x);
+    const s = scoreOnsets(ev.map((e) => e.timeSec), times);
+    expect(s.recall).toBe(1);
+    expect(s.falsePositives).toBe(0);
+    // Timed at the first strings the detector can hear: the quiet low E (behind the 70 Hz high-pass)
+    // is not detected on its own, so the time is 20-40 ms after it. Known limitation (TECH.md 2.2).
+    expect(s.maxAbsErrorMs).toBeLessThan(45);
+  });
+
+  it('keeps multi-string down-up strums 125 ms apart separate (down: low->high over 25 ms, up: high->low over 15 ms)', () => {
+    const times = Array.from({ length: 40 }, (_, i) => 2.5 + i * 0.125);
+    const x = noise(0.003, Math.round(9 * SR), 22);
+    const strings = [110, 164.8, 220, 261.6, 329.6];
+    times.forEach((t, i) => {
+      const down = i % 2 === 0;
+      const order = down ? strings : [...strings].reverse().slice(0, 4); // up-strums catch the top strings
+      order.forEach((f, s) => mixAt(x, pluck(f, down ? 0.06 : 0.05, Math.round(0.6 * SR), 3000 + i * 10 + s), Math.round((t + s * (down ? 0.006 : 0.005)) * SR)));
+    });
+    const ev = detect(x);
+    const s = scoreOnsets(ev.map((e) => e.timeSec), times);
+    expect(s.recall).toBeGreaterThanOrEqual(0.95);
+    expect(s.falsePositives).toBe(0);
+    expect(s.maxAbsErrorMs).toBeLessThan(10);
+  });
+
+  it('a quiet precursor (finger noise) just before a strum: one event, timed at the strum', () => {
+    const x = noise(0.002, 5 * SR, 23);
+    mixAt(x, pluck(330, 0.01, Math.round(0.3 * SR), 5), Math.round(2.9 * SR)); // ~-20 dB below the strum
+    mixAt(x, pluck(110, 0.3, SR, 6), Math.round(2.97 * SR));
+    const ev = detect(x);
+    expect(ev).toHaveLength(1);
+    expect(Math.abs(ev[0].timeSec - 2.97)).toBeLessThan(0.01);
+  });
+
   it('timestamps are sample indices on the audio clock, independent of push size', () => {
     const times = irregularTimes(10);
     const x = strumTrack({ timesSec: times, durationSec: times[times.length - 1] + 2 });
@@ -208,7 +251,7 @@ describe('onset detector: live settings', () => {
     return out.map((e) => Math.round(e.timeSec * 100) / 100);
   }
 
-  it('minimum gap merges strums closer than minInterOnsetMs (first wins)', () => {
+  it('the merge window joins strums closer than minInterOnsetMs (first wins at equal level)', () => {
     expect(run({ minInterOnsetMs: 70 })).toEqual([2.5, 3.0]);
     expect(run({ minInterOnsetMs: 40 })).toEqual([2.5, 2.56, 3.0]);
   });

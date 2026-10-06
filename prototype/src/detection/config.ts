@@ -63,8 +63,32 @@ export interface NoiseFloorConfig {
   quietMeasureMs: number;
   /** Percentile (0-100) of block RMS (dBFS) during the quiet period used as the initial floor. */
   initialPercentile: number;
-  /** Lowest value the floor can take (dBFS). Lower than the meter scale on purpose. */
+  /** Lowest value the floor can take (dBFS). Lower than the meter scale on purpose; real mics never get here. */
   minDb: number;
+  /**
+   * Blocks quieter than this (dBFS) are digital silence (exact zeros: mic muted while the page was in
+   * the background, mic start-up, a stalled stream). They are ignored completely: they are not room noise.
+   * Before 0.3 they dragged the floor to the clamp (-100 dBFS on the Galaxy S24), which disabled the level gate.
+   */
+  digitalSilenceDb: number;
+  /**
+   * The quiet measurement is "unsteady" (someone played or talked) when p90 - p10 of its blocks
+   * exceeds this. A steady room is within ~3-6 dB; strumming gives 30+ dB.
+   */
+  maxQuietSpreadDb: number;
+  /**
+   * ... or when its median is louder than this (dBFS). With processing off, real rooms measured so far
+   * sit around -50 to -60 dBFS; continuous strumming (ringing strings, small spread) is -10 to -25.
+   */
+  maxQuietDb: number;
+  /** Unsteady measurements are repeated this many times ("Please stay quiet — measuring again"). */
+  maxQuietRetries: number;
+  /**
+   * If it is still unsteady after the retries, the floor is this low percentile instead of p90,
+   * capped at `unsteadyMaxFloorDb` (a typical quiet room; the tracker then adjusts it slowly).
+   */
+  unsteadyPercentile: number;
+  unsteadyMaxFloorDb: number;
   /** The tracker looks at windows of this length and uses their percentile below. */
   trackWindowMs: number;
   /** Percentile (0-100) of block RMS inside a tracking window (same idea as initialPercentile). */
@@ -84,7 +108,13 @@ export interface NoiseFloorConfig {
 export const noiseFloorConfig: NoiseFloorConfig = {
   quietMeasureMs: 2000,
   initialPercentile: 90,
-  minDb: -100,
+  minDb: -90,
+  digitalSilenceDb: -120,
+  maxQuietSpreadDb: 12,
+  maxQuietDb: -30,
+  maxQuietRetries: 2,
+  unsteadyPercentile: 20,
+  unsteadyMaxFloorDb: -50,
   trackWindowMs: 1000,
   trackPercentile: 90,
   fallDbPerSec: 10,
@@ -126,8 +156,24 @@ export interface OnsetConfig {
   peakPreMaxMs: number;
   /** ... and this much time after it. This is the added detection delay. */
   peakLookaheadMs: number;
-  /** Two strums closer than this count as one (the first wins). 120 BPM sixteenths = 125 ms. */
+  /**
+   * Strum merge window. A real strum hits the strings one after another, and a slow strum can take
+   * ~100 ms, giving one onset-function peak per string or two (rec1, Galaxy S24: pairs 70-100 ms apart).
+   * All candidate peaks within this window of the first one are ONE strum (see `strumLevelSpanDb`).
+   * 120 BPM sixteenths (fastest down-up target) = 125 ms, so keep it below ~120 ms.
+   */
   minInterOnsetMs: number;
+  /**
+   * Exception to the merge window: a candidate this many times stronger (ODF peak) than the first
+   * one in the window starts a new strum (a fresh, much sharper attack). 0 = never split.
+   */
+  splitStrengthRatio: number;
+  /**
+   * Timestamp of a merged strum: the first candidate whose level is within this many dB of the loudest
+   * candidate in the window. A quiet precursor (finger noise, a faint first string) followed by the
+   * real strum is then timed at the real strum.
+   */
+  strumLevelSpanDb: number;
   /** Absolute floor: the strum's frame level must be at least this far above the room noise floor. */
   minAboveRoomDb: number;
   /** Floor used until the room has been measured (effectively "no level gate"). */
@@ -139,8 +185,13 @@ export interface OnsetConfig {
   refineSearchMs: number;
   /** The search uses an attack envelope (energy of x[n]-x[n-1]) in blocks of this length. */
   attackBlockMs: number;
-  /** Onset = first block in the search window above min + fraction * (max - min) of the envelope. */
+  /**
+   * Onset = first block in the search window above base + fraction * (max - base) of the envelope,
+   * where base = the median of the first `refineBaselineFraction` of the window (the sound before
+   * the attack; with a chord still ringing the minimum block is far too low a baseline).
+   */
   attackFraction: number;
+  refineBaselineFraction: number;
 }
 
 export const onsetConfig: OnsetConfig = {
@@ -156,12 +207,15 @@ export const onsetConfig: OnsetConfig = {
   medianWindowMs: 100,
   peakPreMaxMs: 16,
   peakLookaheadMs: 16,
-  minInterOnsetMs: 70,
+  minInterOnsetMs: 110,
+  splitStrengthRatio: 2.5,
+  strumLevelSpanDb: 12,
   minAboveRoomDb: 10,
   fallbackNoiseFloorDb: -100,
   refineSearchMs: 50,
   attackBlockMs: 1,
   attackFraction: 0.2,
+  refineBaselineFraction: 0.5,
 };
 
 /** Onset settings the Developer drawer may change live (no detector restart needed). */
@@ -270,4 +324,73 @@ export const tunerConfig: TunerConfig = {
   holdMs: 1500,
   inTuneFrames: 6,
   inTuneMemoryMs: 90_000,
+};
+
+/**
+ * Chord classification (0.3). For each strum: one Hann window over [onset + chordWindowStartMs,
+ * onset + chordWindowEndMs] of the analysis signal, zero-padded FFT, folded into a 12-bin chroma and
+ * a bass chroma, compared with voicing templates (detection/chords.ts). See TECH.md 2.3.
+ */
+export interface ChordConfig {
+  /** Analysis window start after the strum's onset (skips the pick/strum transient). */
+  chordWindowStartMs: number;
+  /** Analysis window end after the onset. The chord can be shown this long after the strum, at the earliest. */
+  chordWindowEndMs: number;
+  /** FFT size (power of two, >= window length; zero-padded). 8192 = 5.9 Hz bins at 48 kHz. */
+  fftSize: number;
+  /** Chroma fold range. */
+  chromaMinHz: number;
+  chromaMaxHz: number;
+  /** Bass chroma range (lowest notes: G2 98, A2 110, C3 131, D3 147 Hz). */
+  bassMinHz: number;
+  bassMaxHz: number;
+  /**
+   * Fold only spectral peaks (local maxima) instead of every bin: the window's leakage skirts and the
+   * noise between partials then add nothing.
+   */
+  peaksOnly: boolean;
+  /** Log compression of the folded chroma: log(1 + gamma * c / max(c)). */
+  chromaLogGamma: number;
+  /** Tuning reference for the pitch-class fold. */
+  a4Hz: number;
+  /** Template partial weights: index 0 = fundamental, 1 = 2nd harmonic, ... */
+  harmonicWeights: number[];
+  /** Weight of the bass-chroma similarity in the final score (0..1; the rest is the full chroma). */
+  bassWeight: number;
+  /** In the bass template, the chord's lowest note gets this weight (other notes 1). */
+  bassRootWeight: number;
+  /** "Unsure" if the best score is below this ... */
+  minScore: number;
+  /** ... or beats the second best by less than this. */
+  minMargin: number;
+  /** Confidence: margin at which the margin part reaches 100%. */
+  marginFull: number;
+  /** The level of the window must be at least this far above the room floor (otherwise "?"). */
+  minAboveRoomDb: number;
+}
+
+/**
+ * Defaults tuned lightly on rec1 (Galaxy S24, C/G/D strums; TECH.md 2.3): peaks-only fold, a later and
+ * longer window (50-160 ms: a slow strum is still building up at 30 ms) and gentle log compression gave
+ * the biggest margins. Bass weight kept small but non-zero: it is the main Am/C cue in theory, and rec1
+ * has no Am to check it on.
+ */
+export const chordConfig: ChordConfig = {
+  chordWindowStartMs: 50,
+  chordWindowEndMs: 160,
+  fftSize: 8192,
+  chromaMinHz: 75,
+  chromaMaxHz: 2000,
+  bassMinHz: 75,
+  bassMaxHz: 170,
+  peaksOnly: true,
+  chromaLogGamma: 3,
+  a4Hz: 440,
+  harmonicWeights: [1, 0.6, 0.4, 0.3, 0.2, 0.15],
+  bassWeight: 0.1,
+  bassRootWeight: 2,
+  minScore: 0.7,
+  minMargin: 0.05,
+  marginFull: 0.2,
+  minAboveRoomDb: 6,
 };
