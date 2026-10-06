@@ -4,13 +4,17 @@ import {
   levelConfig,
   noiseFloorConfig,
   onsetConfig,
+  pitchConfig,
   recordingConfig,
+  tunerConfig,
   type LiveOnsetSettings,
   type OnsetConfig,
 } from './detection/config';
 import { initialMeterState, rms, toDbfs, updateMeter, type MeterState } from './detection/level';
 import { isNoisyRoom, NoiseFloorEstimator } from './detection/noiseFloor';
 import type { OnsetEvent } from './detection/onset';
+import { PitchTracker, type PitchFrame } from './detection/pitch';
+import { TunerSmoother } from './detection/tuner';
 import { MicSession } from './audio/mic';
 import { classifyMicError, type MicError } from './audio/errors';
 import type { LevelMessage, WorkletMessage } from './audio/messages';
@@ -28,6 +32,7 @@ import {
 import { createStrumView } from './ui/strumView';
 import { createDevDrawer } from './ui/devDrawer';
 import { shareOrDownload } from './ui/share';
+import { createTunerView, tunerSummary, type TunerPhase } from './ui/tunerView';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -55,6 +60,12 @@ const ui = {
   clearStrums: $<HTMLButtonElement>('clear-strums'),
   devReset: $<HTMLButtonElement>('dev-reset'),
   devCopy: $<HTMLButtonElement>('dev-copy'),
+  modeStrum: $<HTMLButtonElement>('mode-strum'),
+  modeTuner: $<HTMLButtonElement>('mode-tuner'),
+  tunerCard: $('tuner-card'),
+  strumCard: $('strum-card'),
+  logCard: $('log-card'),
+  dev: $('dev'),
 };
 
 const strumView = createStrumView({
@@ -79,7 +90,7 @@ const meterView = createMeterView({
   scale: $('scale'),
 });
 
-const BUILD = `v0.2 · ${__BUILD_ID__} · ${__BUILD_TIME__}`;
+const BUILD = `v0.2.1 · ${__BUILD_ID__} · ${__BUILD_TIME__}`;
 ui.build.textContent = BUILD;
 
 // ---- state ----
@@ -106,6 +117,32 @@ let liveSettings: LiveOnsetSettings = { ...DEFAULT_LIVE };
 const currentOnsetConfig = (): OnsetConfig => ({ ...onsetConfig, ...liveSettings });
 /** Every strum since Start (also used to fill the recording's JSON). */
 const strums: OnsetEvent[] = [];
+
+// Mode + tuner (0.2.1). Pitch detection runs on the main thread on analysis audio the worklet
+// streams only while the tuner is open (TECH.md 2.6). The strum detector keeps running in the worklet.
+type Mode = 'strum' | 'tuner';
+let mode: Mode = 'strum';
+let pitchTracker: PitchTracker | null = null;
+const tuner = new TunerSmoother(tunerConfig);
+let lastPitch: PitchFrame | null = null;
+let lastReading: PitchFrame | null = null;
+let pitchFrames = 0;
+let pitchReadings = 0;
+let pitchMsTotal = 0;
+const tunerView = createTunerView(
+  {
+    note: $('tuner-note'),
+    string: $('tuner-string'),
+    needle: $('tuner-needle'),
+    zone: $('needle-zone'),
+    cents: $('tuner-cents'),
+    hint: $('tuner-hint'),
+    sub: $('tuner-sub'),
+    hz: $('tuner-hz'),
+    chips: $('string-chips'),
+  },
+  (n) => tuner.lock(tuner.lockedString === n ? null : n),
+);
 
 // Recording.
 type RecState = 'idle' | 'recording' | 'stopping' | 'ready';
@@ -136,13 +173,55 @@ function onWorkletMessage(msg: WorkletMessage): void {
       return;
     case 'record-stopped':
       return onRecordingStopped();
+    case 'analysis':
+      return onAnalysis(msg.samples);
   }
+}
+
+/** Tuner: pitch detection on the high-passed audio chunk from the worklet. */
+function onAnalysis(samples: Float32Array): void {
+  if (mode !== 'tuner' || !pitchTracker) return;
+  const t0 = performance.now();
+  const frames = pitchTracker.push(samples, { noiseFloorDb: noiseFloor.floorDb, expectedHz: tuner.expectedHz });
+  const now = performance.now();
+  pitchMsTotal += now - t0;
+  for (const f of frames) {
+    pitchFrames++;
+    if (f.hz !== null) {
+      pitchReadings++;
+      lastReading = f;
+    }
+    lastPitch = f;
+    tuner.push(f.hz, now);
+  }
+}
+
+function setMode(next: Mode): void {
+  mode = next;
+  const isTuner = next === 'tuner';
+  ui.modeStrum.setAttribute('aria-pressed', String(!isTuner));
+  ui.modeTuner.setAttribute('aria-pressed', String(isTuner));
+  ui.tunerCard.hidden = !isTuner;
+  ui.strumCard.hidden = isTuner;
+  ui.logCard.hidden = isTuner;
+  ui.dev.hidden = isTuner;
+  // Same mic session: only the worklet's analysis tap is switched.
+  pitchTracker?.reset();
+  session?.post({ type: 'tap', on: isTuner });
+  updateResumeButton();
+}
+
+function tunerPhase(): TunerPhase {
+  if (!session) return 'off';
+  return noiseFloor.state === 'measuring' ? 'measuring' : 'listening';
 }
 
 function onOnset(sampleIndex: number, strength: number, levelDb: number): void {
   if (!session) return;
   const ev: OnsetEvent = { sampleIndex, timeSec: sampleIndex / session.ctx.sampleRate, strength, levelDb };
   strums.push(ev);
+  // Plucks while tuning stay in the recording's event list but don't count on the strum screen.
+  if (mode !== 'strum') return;
   const floor = noiseFloor.floorDb;
   strumView.add({ timeSec: ev.timeSec, strength, aboveRoomDb: floor === null ? null : levelDb - floor }, performance.now());
 }
@@ -207,6 +286,7 @@ function frame(now: number): void {
   });
 
   strumView.tick(now);
+  if (mode === 'tuner') tunerView.render(tuner.displayAt(now), tunerPhase(), (n) => tuner.recentlyInTune(n, now), tuner.lockedString);
   if (rec && (recState === 'recording' || recState === 'stopping')) {
     ui.recTime.textContent = `${formatClock(rec.durationSec)} / ${formatClock(recordingConfig.maxRecordSec)}`;
   }
@@ -234,6 +314,7 @@ function reportInput(now: number): ReportInput {
     uaModel: uaHigh.model,
     uaPlatformVersion: uaHigh.platformVersion,
     onsetSummary: onsetSummary(),
+    tunerSummary: tunerSummary(tunerConfig.a4Hz, (n) => tuner.memoryFor(n), (n) => tuner.recentlyInTune(n, now)),
     isSecureContext: window.isSecureContext,
     buildId: BUILD,
     highPassHz: analysisConfig.highPassHz,
@@ -309,7 +390,9 @@ function updateResumeButton(): void {
       ? 'Audio paused (screen locked or app switched). Tap to resume.'
       : noiseFloor.state === 'measuring'
         ? 'Measuring your room. Stay quiet and keep the guitar still.'
-        : 'Listening. Strum your guitar.';
+        : mode === 'tuner'
+          ? 'Listening. Pluck one string at a time.'
+          : 'Listening. Strum your guitar.';
   }
 }
 
@@ -346,10 +429,13 @@ ui.start.addEventListener('click', async () => {
         highPassStages: analysisConfig.highPassStages,
         onset: currentOnsetConfig(),
         recordChunkFrames: recordingConfig.chunkFrames,
+        tapChunkFrames: pitchConfig.hopSamples,
       },
       { onMessage: onWorkletMessage, onChange: () => renderInfo(performance.now()) },
     );
     lastBlockAtMs = performance.now();
+    pitchTracker = new PitchTracker(session.ctx.sampleRate, pitchConfig);
+    if (mode === 'tuner') session.post({ type: 'tap', on: true });
     ui.start.hidden = true;
     ui.record.disabled = false;
     floorSentDb = null;
@@ -478,6 +564,9 @@ ui.export.addEventListener('click', async () => {
 });
 
 // ---- strums + developer drawer ----
+ui.modeStrum.addEventListener('click', () => setMode('strum'));
+ui.modeTuner.addEventListener('click', () => setMode('tuner'));
+
 ui.clearStrums.addEventListener('click', () => strumView.clear());
 
 const devDrawer = createDevDrawer($('sliders'), liveSettings, (patch) => {
@@ -522,4 +611,17 @@ requestAnimationFrame(frame);
   get settings() {
     return liveSettings;
   },
+  get tuner() {
+    return {
+      mode,
+      display: tuner.displayAt(performance.now()),
+      locked: tuner.lockedString,
+      lastPitch,
+      lastReading,
+      pitchFrames,
+      pitchReadings,
+      avgPitchMs: pitchFrames ? pitchMsTotal / pitchFrames : 0,
+    };
+  },
+  setMode,
 };

@@ -5,14 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#111418" />
     <link rel="icon" href="data:," />
-    <title>Chord Detect Prototype 0.2</title>
+    <title>Chord Detect Prototype 0.2.1</title>
   </head>
   <body>
     <main class="app">
       <header class="top">
-        <h1>Strum check</h1>
+        <h1>Chord Detect</h1>
         <span class="build" id="build"></span>
       </header>
+
+      <nav class="mode-switch" aria-label="Mode">
+        <button id="mode-strum" class="mode-btn" type="button" aria-pressed="true">Strum check</button>
+        <button id="mode-tuner" class="mode-btn" type="button" aria-pressed="false">Tuner</button>
+      </nav>
 
       <button id="start" class="big-btn primary" type="button">Start</button>
       <p id="status" class="status">Tap Start, then allow the microphone.</p>
@@ -25,7 +30,28 @@
 
       <button id="resume" class="big-btn resume" type="button" hidden>Tap to resume</button>
 
-      <section class="card strum-card" aria-label="Strums">
+      <section id="tuner-card" class="card tuner-card" aria-label="Tuner" hidden>
+        <div class="tuner-head">
+          <span id="tuner-note" class="tuner-note">–</span>
+          <span id="tuner-string" class="tuner-string">Auto: any string</span>
+        </div>
+        <div class="needle-bar" aria-hidden="true">
+          <div id="needle-zone" class="needle-zone"></div>
+          <div class="needle-tick" style="left: 25%"></div>
+          <div class="needle-tick centre" style="left: 50%"></div>
+          <div class="needle-tick" style="left: 75%"></div>
+          <div id="tuner-needle" class="needle" hidden></div>
+        </div>
+        <div class="needle-scale"><span>−50</span><span>−25</span><span>0</span><span>+25</span><span>+50</span></div>
+        <p id="tuner-cents" class="tuner-cents">-- cents</p>
+        <p id="tuner-hint" class="tuner-hint idle" role="status" aria-live="polite">Tap Start</p>
+        <p id="tuner-sub" class="tuner-sub">Then pluck one string and let it ring.</p>
+        <div id="string-chips" class="string-chips"></div>
+        <p class="hint">Green = tuned recently. Tap a string to lock the tuner to it; tap it again for automatic.</p>
+        <p id="tuner-hz" class="small tuner-hz"></p>
+      </section>
+
+      <section id="strum-card" class="card strum-card" aria-label="Strums">
         <div id="flash" class="flash" role="status" aria-live="polite">
           <span class="flash-label">Strums</span>
           <span id="strum-count" class="strum-count">0</span>
@@ -68,7 +94,7 @@
         <button id="export" class="big-btn export" type="button" hidden>Share / save files</button>
       </section>
 
-      <section class="card log-card" aria-label="Strum log">
+      <section id="log-card" class="card log-card" aria-label="Strum log">
         <div class="info-head">
           <h2>Strum log</h2>
           <span class="small">time since Start · strength · above room</span>

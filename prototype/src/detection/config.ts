@@ -192,3 +192,82 @@ export const strumUiConfig: StrumUiConfig = {
   flashMs: 180,
   logMaxLines: 200,
 };
+
+/**
+ * Pitch detection for the tuner (0.2.1). McLeod Pitch Method (normalised square difference,
+ * computed with an FFT) on the high-passed analysis signal. See detection/pitch.ts and TECH.md 2.6.
+ */
+export interface PitchConfig {
+  /** Analysis window. 4096 = 85 ms at 48 kHz: ~7 periods of low E (82.4 Hz). Power of two. */
+  windowSamples: number;
+  /** A new pitch estimate every this many samples (~21 ms at 48 kHz). */
+  hopSamples: number;
+  /**
+   * Low-pass (2nd-order Butterworth, cascaded `lowPassStages` times) before pitch analysis. Keeps the
+   * fundamental and first harmonics of every open string and removes most hiss, which otherwise
+   * biases the reading by a few cents as the note fades. 0 = off.
+   */
+  lowPassHz: number;
+  lowPassStages: number;
+  /** Lowest / highest pitch searched. E2 -50 cents = 80 Hz, E4 +50 cents = 339 Hz. */
+  minHz: number;
+  maxHz: number;
+  /**
+   * MPM "key maximum" rule: the first NSDF peak at least this fraction of the highest peak wins.
+   * Higher = fewer octave-up errors from a strong 2nd harmonic, but more octave-down risk.
+   */
+  peakThreshold: number;
+  /** Minimum clarity (NSDF peak height, 0..1) for a reading. Noise is ~0.3, a ringing string 0.9+. */
+  minClarity: number;
+  /** The window's level must be at least this far above the room noise floor (silence gate). */
+  minAboveRoomDb: number;
+  /** Absolute level gate (dBFS), also used while the room is still being measured. */
+  minLevelDb: number;
+}
+
+export const pitchConfig: PitchConfig = {
+  windowSamples: 4096,
+  hopSamples: 1024,
+  lowPassHz: 1000,
+  lowPassStages: 2,
+  minHz: 60,
+  maxHz: 420,
+  peakThreshold: 0.9,
+  minClarity: 0.8,
+  minAboveRoomDb: 10,
+  minLevelDb: -70,
+};
+
+/** Tuner logic and display (0.2.1). Standard tuning; see detection/tuner.ts. */
+export interface TunerConfig {
+  /** Reference pitch for A4. */
+  a4Hz: number;
+  /** A string counts as in tune when |cents| is at most this. */
+  inTuneCents: number;
+  /** The needle shows -range..+range cents (further away is pinned at the end). */
+  displayRangeCents: number;
+  /** Median over this many recent readings (in cents) ... */
+  medianFrames: number;
+  /** ... followed by an exponential moving average with this weight for the newest value (0..1). */
+  emaAlpha: number;
+  /** A different string must win this many readings in a row before the display switches to it. */
+  switchFrames: number;
+  /** When the note fades (no readings), keep showing the last value this long. */
+  holdMs: number;
+  /** A string must stay in tune for this many readings in a row before its chip turns green. */
+  inTuneFrames: number;
+  /** A chip stays green this long after the string was last in tune ("recently"). */
+  inTuneMemoryMs: number;
+}
+
+export const tunerConfig: TunerConfig = {
+  a4Hz: 440,
+  inTuneCents: 5,
+  displayRangeCents: 50,
+  medianFrames: 5,
+  emaAlpha: 0.35,
+  switchFrames: 3,
+  holdMs: 1500,
+  inTuneFrames: 6,
+  inTuneMemoryMs: 90_000,
+};

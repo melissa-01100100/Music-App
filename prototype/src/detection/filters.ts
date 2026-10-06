@@ -36,6 +36,24 @@ export function highPassCoeffs(cutoffHz: number, sampleRate: number, q = Math.SQ
   };
 }
 
+/** 2nd-order low-pass (RBJ Audio EQ Cookbook), Butterworth with the default Q. */
+export function lowPassCoeffs(cutoffHz: number, sampleRate: number, q = Math.SQRT1_2): BiquadCoeffs {
+  if (!(cutoffHz > 0) || !(sampleRate > 0) || cutoffHz >= sampleRate / 2) {
+    throw new RangeError(`Invalid low-pass cutoff ${cutoffHz} Hz at ${sampleRate} Hz`);
+  }
+  const w0 = (2 * Math.PI * cutoffHz) / sampleRate;
+  const cos = Math.cos(w0);
+  const alpha = Math.sin(w0) / (2 * q);
+  const a0 = 1 + alpha;
+  return {
+    b0: (1 - cos) / 2 / a0,
+    b1: (1 - cos) / a0,
+    b2: (1 - cos) / 2 / a0,
+    a1: (-2 * cos) / a0,
+    a2: (1 - alpha) / a0,
+  };
+}
+
 /** Magnitude response |H(f)| of a biquad (linear gain). Used by tests and for docs. */
 export function biquadGainAt(c: BiquadCoeffs, freqHz: number, sampleRate: number): number {
   const w = (2 * Math.PI * freqHz) / sampleRate;

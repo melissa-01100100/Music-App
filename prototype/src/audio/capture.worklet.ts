@@ -3,6 +3,8 @@
  *  - analysis path: the mic signal through a 2nd-order high-pass (`highPassHz`). Feeds the level
  *    statistics (meter, noise floor) and the strum (onset) detector.
  *  - raw path: the untouched mic signal. Clip detection, and recording (posted in chunks).
+ *  - tap (0.2.1): while the tuner is open, the analysis signal is posted to the main thread in
+ *    chunks for the pitch detector. Off by default; the strum detector is not affected.
  * The raw input buffer is never modified; filtering writes into a scratch buffer.
  *
  * Why the onset detector runs here (TECH.md 2.5): it is cheap (one 1024-point FFT every
@@ -18,6 +20,7 @@ import { onsetConfig } from '../detection/config';
 import { OnsetDetector } from '../detection/onset';
 import {
   CAPTURE_PROCESSOR_NAME,
+  type AnalysisChunkMessage,
   type CaptureOptions,
   type ControlMessage,
   type LevelMessage,
@@ -51,6 +54,12 @@ class CaptureProcessor extends AudioWorkletProcessor {
   private recFill = 0;
   private recChunkStart = 0;
 
+  private tapping = false;
+  private readonly tapChunkFrames: number;
+  private tapChunk: Float32Array | null = null;
+  private tapFill = 0;
+  private tapChunkStart = 0;
+
   constructor(options?: { processorOptions?: unknown }) {
     super(options);
     const opts = (options?.processorOptions ?? {}) as Partial<CaptureOptions>;
@@ -60,13 +69,18 @@ class CaptureProcessor extends AudioWorkletProcessor {
     this.hpf = Array.from({ length: Math.max(1, opts.highPassStages ?? 1) }, () => new Biquad(coeffs));
     this.detector = new OnsetDetector(sampleRate, opts.onset ?? onsetConfig);
     this.recordChunkFrames = opts.recordChunkFrames ?? 4096;
+    this.tapChunkFrames = opts.tapChunkFrames ?? 1024;
     this.port.onmessage = (e: MessageEvent<ControlMessage>) => this.onControl(e.data);
   }
 
   private onControl(msg: ControlMessage): void {
     if (msg.type === 'onset-settings') this.detector.updateSettings(msg.settings);
     else if (msg.type === 'noise-floor') this.detector.setNoiseFloorDb(msg.db);
-    else if (msg.type === 'record') {
+    else if (msg.type === 'tap') {
+      this.tapping = msg.on;
+      this.tapChunk = null;
+      this.tapFill = 0;
+    } else if (msg.type === 'record') {
       if (msg.on && !this.recording) {
         this.recording = true;
         this.recChunk = null;
@@ -92,6 +106,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
     for (let s = 1; s < this.hpf.length; s++) this.hpf[s].process(this.scratch, this.scratch);
 
     if (this.recording) this.record(channel);
+    if (this.tapping) this.tap(this.scratch);
 
     // The detector's sample counter equals framesProcessed (both start at 0 and see every frame).
     const events = this.detector.push(this.scratch);
@@ -139,6 +154,27 @@ class CaptureProcessor extends AudioWorkletProcessor {
       this.recFill += n;
       i += n;
       if (this.recFill === this.recChunk.length) this.flushRecording();
+    }
+  }
+
+  /** Copies the ANALYSIS quantum into the tap chunk; posts full chunks (transferred). */
+  private tap(analysis: Float32Array): void {
+    let i = 0;
+    while (i < analysis.length) {
+      if (!this.tapChunk) {
+        this.tapChunk = new Float32Array(this.tapChunkFrames);
+        this.tapFill = 0;
+        this.tapChunkStart = this.framesProcessed + i;
+      }
+      const n = Math.min(analysis.length - i, this.tapChunk.length - this.tapFill);
+      this.tapChunk.set(analysis.subarray(i, i + n), this.tapFill);
+      this.tapFill += n;
+      i += n;
+      if (this.tapFill === this.tapChunk.length) {
+        const msg: AnalysisChunkMessage = { type: 'analysis', startFrame: this.tapChunkStart, samples: this.tapChunk };
+        this.port.postMessage(msg, [this.tapChunk.buffer]);
+        this.tapChunk = null;
+      }
     }
   }
 

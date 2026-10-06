@@ -14,6 +14,8 @@ export interface CaptureOptions {
   onset: OnsetConfig;
   /** Raw-audio chunk size posted while recording. */
   recordChunkFrames: number;
+  /** Analysis-audio chunk size posted while the tuner tap is on (0.2.1). */
+  tapChunkFrames?: number;
 }
 
 export interface LevelMessage {
@@ -60,10 +62,23 @@ export interface RecordStoppedMessage {
   endFrame: number;
 }
 
-export type WorkletMessage = LevelMessage | OnsetMessage | RawChunkMessage | RecordStoppedMessage;
+/**
+ * High-passed ANALYSIS audio for the tuner's pitch detector (main thread), only while the tap is on.
+ * `samples` is transferred, not copied.
+ */
+export interface AnalysisChunkMessage {
+  type: 'analysis';
+  /** framesProcessed index of samples[0]. */
+  startFrame: number;
+  samples: Float32Array;
+}
+
+export type WorkletMessage = LevelMessage | OnsetMessage | RawChunkMessage | RecordStoppedMessage | AnalysisChunkMessage;
 
 /** Main thread -> worklet. */
 export type ControlMessage =
   | { type: 'onset-settings'; settings: Partial<LiveOnsetSettings> }
   | { type: 'noise-floor'; db: number | null }
-  | { type: 'record'; on: boolean };
+  | { type: 'record'; on: boolean }
+  /** Tuner on/off: stream the analysis signal to the main thread. */
+  | { type: 'tap'; on: boolean };

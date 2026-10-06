@@ -47,6 +47,8 @@ export interface ReportInput {
   highPassStages?: number;
   /** One-line summary of the strum detector settings. */
   onsetSummary?: string;
+  /** Tuner: reference pitch and last reading per string (0.2.1). */
+  tunerSummary?: string;
   /** Room noise floor (present once the mic has started). */
   noiseFloor?: {
     phase: 'measuring' | 'tracking';
@@ -119,6 +121,7 @@ export function buildDeviceReport(input: ReportInput): ReportRow[] {
   }
 
   if (input.onsetSummary) rows.push({ label: 'Strum detector', value: input.onsetSummary, status: 'info' });
+  if (input.tunerSummary) rows.push({ label: 'Tuner', value: input.tunerSummary, status: 'info' });
 
   const mic = input.mic;
   if (!mic) {
