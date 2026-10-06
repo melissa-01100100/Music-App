@@ -1,7 +1,7 @@
 # Tech
 
 > Owner: developer. Stack, folder structure, conventions, how to run and test.
-> Status: **Phase 0 plan (audio detection prototype)**. No application code has been written yet.
+> Status: **Phase 0 in progress.** Plan approved by owner. Milestone 0.1 (mic + level meter) tested by owner on Pixel 10; 0.1.1 (room noise floor + high-pass) built; **0.2 (strum detection + recording/export) built, pending owner test**.
 > Last updated: 2026-10-05
 
 **How to read this doc:** Sections marked **(Plain English)** are written for the owner. Sections marked **(Technical)** are for the developer. You can skip those without missing any decisions.
@@ -91,8 +91,10 @@ Because there are only **four** possible answers, the task is much easier than g
 - **Onset function:** half-wave-rectified **spectral flux** on log-compressed magnitudes (`log(1 + γ·|X|)`), optionally weighted toward higher bins (high-frequency content, HFC). Strum attacks are broadband and bright, while sustained notes are not, so HFC weighting suppresses retriggers from ringing strings.
 - **Adaptive threshold:** `threshold[n] = δ + λ · median(odf[n−a … n+b])`, plus an absolute floor tied to the mic noise level measured at start-up.
 - **Peak picking:** local maximum within ±w frames, above threshold. Lookahead b ≈ 2–3 hops (~10–16 ms) of added detection delay.
-- **Minimum inter-onset interval:** e.g. 80–120 ms, so a single strum that hits six strings over 20–40 ms gives **one** event, not six. (This is tunable. Fast up-down strumming may need a lower value; see the open questions.)
+- **Minimum inter-onset interval:** e.g. 60–100 ms, so a single strum that hits six strings over 20–40 ms gives **one** event, not six. Down-up strumming patterns are in scope (owner answer, 2026-10-05): at 120 BPM, eighth-note down-up strums are 250 ms apart and sixteenths 125 ms, so the interval must stay well below ~120 ms. Each event also records **strum direction (down/up)** where it can be estimated (low strings first = down, high strings first = up), as a stretch goal.
 - **Timestamp:** the onset frame's sample index, refined back toward the start of the energy rise (e.g. the first frame above 50% of the peak flux). The time is the **sample count**, not wall-clock (see section 3.2).
+- **As built in 0.2** (`src/detection/onset.ts`, all numbers in `onsetConfig`): magnitudes normalised so a full-scale sine = 1, `log(1 + 1000·|X|)`, bins 60 Hz–10 kHz with weight `1 + f/10 kHz` (normalised to sum 1). Flux compares each frame with the frame **2 hops earlier** (`fluxLagFrames`): a real strum hits the strings one after another over 20–40 ms, and lag-1 flux split that rise into several weak peaks (a synthetic 6-string strum spread over 30 ms was missed 4 times in 12). Threshold `0.10 + 1.5 · median(odf over the past 100 ms + lookahead)`; the peak must be the max over −16/+16 ms (16 ms lookahead). **Absolute floor** = a separate level gate: frame RMS around the peak must be ≥ room floor (from the 0.1.1 noise-floor tracker, sent to the worklet whenever it changes) + `minAboveRoomDb` (10 dB). Before the room is measured the gate is off. Min gap 70 ms (first strum wins). **Timestamp refinement:** in the 50 ms before the end of the peak frame (never before the previous strum + min gap), the first 1 ms block where the energy of `x[n] − x[n−1]` (an attack/pick-noise envelope) rises above `min + 0.2·(max − min)`. Each event: `{ sampleIndex, timeSec, strength (ODF peak), levelDb }`. Direction (down/up) is not attempted yet.
+- **Synthetic results (unit tests):** irregular plucks over −50 dBFS noise, amplitudes varying by 11 dB: 40/40 found, 0 extra, max timing error 0.7 ms. 125 ms down-up spacing (loud/soft alternating, also same pitch): 48/48, no merges or doubles. 6-string 30 ms strum: 12/12, timed at the first string (< 10 ms). Noise, noise swelling +30 dB over 6 s, a fading-in tone, 30/50 Hz rumble with 25 Hz modulation: 0 triggers. Noise with the level gate off: 0 in 5 minutes (noise ODF max 0.07 vs threshold ~0.17). **Synthetic signals are much easier than a real guitar**: the real numbers come from the owner's recordings.
 
 ### 2.3 Chord recognition (Technical)
 
@@ -130,9 +132,19 @@ Because there are only **four** possible answers, the task is much easier than g
 | **aubio** (C) | Mature onset/pitch detection | **GPL-3.0** | Reference for onset ideas only. GPL is also a problem for a closed-source commercial game |
 | Small FFT (e.g. fft.js, KissFFT, pffft) | FFT only | MIT / BSD | **Use one** of these inside our core |
 
+**FFT as built (0.2):** a hand-written iterative radix-2 complex FFT (`src/detection/fft.ts`, ~60 lines, our own code, so no licence question), checked against a direct DFT in the tests. No FFT library dependency was needed.
+
 **Recommendation:** **hand-roll a small DSP core** (FFT via a permissive library, spectral-flux onsets, FFT-chroma, template matching). Reasons: (1) it is small and fully understood, which makes it easy to tune and to port; (2) no licence risk for a commercial game; (3) no heavy WASM blob to load on phones. Use Meyda (and Essentia.js in a dev-only tool) to **cross-check** our numbers on the golden clips.
 
 **Later option, ML:** if templates plus calibration plateau below target, train a **tiny classifier** (e.g. logistic regression or a small CNN over a few chroma/log-spectrum frames, 5 outputs including "none") on the labelled recordings. It is still small enough to port (ONNX, or hand-written inference). We only do this if the data shows it is needed, and the golden set we are building now is exactly the training data it would need.
+
+### 2.5 Where the strum detector runs (Technical, decided in 0.2)
+
+**In the capture AudioWorklet** (audio thread), on the high-passed analysis signal, right after the filter.
+- *Cost, measured:* 60 s of 48 kHz audio in ~430 ms in Node on one 2.1 GHz Xeon core: **~19 µs per 128-frame quantum, 0.7% of the 2.67 ms budget** (one 1024-point FFT every 2 quanta). Even if a phone core is 10x slower that is ~7%. `push()` allocates nothing in steady state (preallocated buffers, insertion-sort median), so there is no garbage-collection pressure on the audio thread.
+- *Why not the main thread:* the worklet would have to post every sample (~375 messages/s), and detection would stall whenever the UI is busy. *Why not a Web Worker:* extra MessageChannel plumbing for no gain at this cost. Revisit for chroma (0.3, N=4096–8192) if it turns out heavier; a Worker is the fallback.
+- *Timeline:* the detector's sample counter equals the worklet's `framesProcessed` (both start at 0 at Start and see every frame), so `sampleIndex / sampleRate` = seconds since Start on the audio clock. Recording chunks carry the same frame index, so events are placed exactly in the WAV (verified: offline detection on an exported WAV reproduced the live events to 0.0 ms).
+- *Messages:* main → worklet: `onset-settings` (live sliders), `noise-floor` (on change), `record` on/off. Worklet → main: `level` (as before), `onset`, `raw` (4096-frame chunks, transferred, only while recording), `record-stopped`.
 
 ---
 
@@ -206,12 +218,14 @@ Measured on the golden recordings **and** live on the target phones:
 | False triggers in a quiet room, guitar not played (incl. string ringing, handling noise) | **< 1 per minute** |
 | Chord result on screen after the strum | ≤ 250 ms |
 | Progression at medium tempo (e.g. 90 BPM, one strum per beat) | ≥ 90% correct chords |
+| Strumming pattern (e.g. D-DU-UDU at 80 BPM, one chord per bar) | ≥ 90% of strums detected, ≥ 85% correct chords, no double/missed events on up-strums |
 | Runs smoothly | No audio dropouts over a 5-minute session |
 
 ### 4.3 Target devices
 
 - **The owner's own phone(s)** first (model to be confirmed, see open questions).
-- At least **one recent iPhone (Safari)** and **one mid-range Android (Chrome)**. If the owner has only one, we note the gap as a risk for later.
+- **Android phones in Chrome** (owner answer, 2026-10-05). If the owner has more than one Android phone, test on each, because Android mic delay varies a lot between models.
+- iPhone/Safari is **not** a Phase 0 target. The code avoids anything Android-only so iPhone can be added later.
 - Guitar: the owner's guitar (acoustic assumed) in standard tuning.
 
 ---
@@ -232,7 +246,9 @@ prototype/                     # Phase 0 web prototype (kept separate from any f
   src/
     detection/                 # PURE DSP core. No DOM, no Web Audio. Portable.
       config.ts                # ALL tunables, units in names
-      fft.ts                   # wraps a permissive FFT library
+      fft.ts                   # hand-written radix-2 FFT + Hann window
+      pipeline.ts              # offline chain (high-pass + detector + floor) for tests/tools
+      evaluate.ts              # onset scoring (recall, precision, timing error)
       onset.ts                 # spectral flux / HFC, adaptive threshold, peak picking
       chroma.ts                # chroma + bass chroma
       chords.ts                # chord templates (voicings, harmonic weights)
@@ -242,7 +258,7 @@ prototype/                     # Phase 0 web prototype (kept separate from any f
     audio/                     # browser-only glue
       mic.ts                   # getUserMedia, AudioContext resume, settings report
       capture.worklet.ts       # AudioWorklet processor (frame counting, ring buffer)
-      recorder.ts / wav.ts     # record + encode WAV
+      recording.ts / wav.ts    # recording buffer + export JSON / WAV encode+decode (pure, tested)
       metronome.ts             # scheduled clicks on the audio clock
     ui/                        # screens: meter, live display, log, sliders, test mode
     main.ts
@@ -258,6 +274,59 @@ prototype/                     # Phase 0 web prototype (kept separate from any f
 **Label format** (draft): `{ "sampleRate": 48000, "device": "...", "events": [ { "timeSec": 1.234, "chord": "C" }, ... ] }`. Test-mode exports produce this automatically (expected chord + beat time), so the owner's test sessions become fixtures.
 
 **Conventions:** small pure functions; every DSP parameter in `config.ts`; the detector is deterministic (same input gives the same output); `npm test` must pass before deploy.
+
+---
+
+## 5a. How to run (developer) (Technical)
+
+All commands run in `prototype/`. Node 20.19+ or 22 (CI uses 22).
+
+| Command | What it does |
+|---|---|
+| `npm ci` | Install exact dependency versions from `package-lock.json` |
+| `npm run dev` | Dev server on http://localhost:5173 (mic works on localhost) |
+| `npm test` | Vitest unit tests (Node, no browser) |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run build` | Typecheck + production build into `prototype/dist/` |
+| `npm run preview` | Serve the production build on http://localhost:4173 |
+| `npm run evaluate` | Score the strum detector on every `test/fixtures/*.wav` + `*.labels.json` pair (or `npm run evaluate -- <dir>`). Prints recall, precision, bias, median/p95 timing error. Uses `tsx` (MIT, dev only). Prints a message and exits 0 if there are no fixtures |
+
+- **Worklet bundling:** `src/audio/capture.worklet.ts` is imported in `mic.ts` with `?worker&url`, so Vite bundles it (and its imports from `detection/`) into one self-contained file in `dist/assets/`. Do not load it with a plain `new URL('./x.ts', ...)`: that copies the `.ts` file without compiling it.
+- **Never import the worklet module from main-thread code.** It calls `registerProcessor`, which only exists on the audio thread. Shared constants go in `audio/messages.ts`.
+- `base: './'` in `vite.config.ts` makes asset paths relative, so the same build works at `/` and at the GitHub Pages sub-path `/Music-App/`.
+- The build ID shown in the page header (and in "Copy info") is the first 7 characters of `GITHUB_SHA`, or `dev` for local builds. Use it to confirm which version the owner has loaded.
+- `window.__micDebug.session` exposes the running `MicSession` in the browser console (debugging and smoke tests).
+- **Deploy:** `.github/workflows/deploy-prototype.yml` runs on push to `main` or `claude/gallant-archimedes-8jhys7` (when `prototype/**` or the workflow changes) and on manual dispatch: `npm ci`, `npm test`, `npm run build`, then deploys `prototype/dist` to GitHub Pages. One-time setup: Settings → Pages → Source: "GitHub Actions". To deploy from a non-default branch, that branch must also be allowed in Settings → Environments → `github-pages` → Deployment branches.
+- **Smoke test (manual, headless):** run `npm run preview`, then open it in Chromium with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`, tap Start, and check that "Frames processed" increases, the "Stay quiet..." countdown ends with a "Room noise" number, and the console has no errors. The fake device plays a full-scale beep, so the meter shows red/CLIP. That is expected. **0.2:** the fake beep repeats every 0.5 s, so the strum counter should go up twice per second. Record → Stop → "Share / save files" downloads a WAV + JSON (desktop Linux Chromium has no Web Share, so it uses the download fallback). `window.__micDebug.strums`, `.recording` and `.settings` help scripted checks.
+
+### Progress
+
+| Milestone | Status |
+|---|---|
+| 0.1 Mic + level meter | **Built 2026-10-05.** Unit tests and headless smoke test pass. **Owner test, Pixel 10, Android Chrome (2026-10-05):** echoCancellation / noiseSuppression / autoGainControl all **off**, 48 kHz, mono, base latency 5 ms, mic latency (reported) 40 ms, no dropped blocks, deploy link works. Feedback: "the bar was always moving when I wasn't playing". Expected with processing off and a -60 dB meter scale; addressed in 0.1.1. Not yet reported: lock/unlock resume. |
+| 0.1.1 Room noise floor + analysis high-pass | **Built 2026-10-05.** 55 unit tests, typecheck, build and headless smoke test pass. **Pending owner retest on the Pixel 10** (does the bar stay grey / chip say "Quiet" when not playing, and go green on a strum? what "Room noise" value does the phone show?). |
+| 0.2 Strum detection + record/export | **Built 2026-10-05.** 85 unit tests, typecheck, build pass. Headless Chromium smoke test: fake-mic beeps (every 0.5 s) detected 19/19 in 9.5 s at 0.500 s spacing, flash fires, sliders apply live and reset, Record → Stop → export gives a valid 16-bit mono WAV + JSON, offline re-detection on the WAV matches the live events exactly, no console errors. **Pending owner test on the Pixel 10 with the guitar**, plus the first real recordings for the golden set. |
+| 0.3–0.5 | Not started |
+
+**0.1 code map:** `src/audio/mic.ts` (getUserMedia with processing off, AudioContext created/resumed in the Start click, statechange/visibility handling with "Tap to resume", re-acquiring the mic if the track ended, Screen Wake Lock), `src/audio/capture.worklet.ts` (counts frames, posts sum-of-squares/peak/clip count every `blockSizeFrames`), `src/audio/errors.ts` (friendly error messages), `src/detection/config.ts` + `level.ts` (pure meter maths), `src/ui/meter.ts`, `src/ui/deviceReport.ts`, `src/main.ts`.
+
+**0.1.1 additions:** `src/detection/filters.ts` (biquad high-pass, pure), `src/detection/noiseFloor.ts` (quiet measurement + floor tracker, pure), tests in `test/filters.test.ts`, `test/noiseFloor.test.ts` (synthetic noise + 30 Hz rumble + 110 Hz burst, helpers in `test/signals.ts`).
+
+**0.2 additions:** `src/detection/fft.ts`, `onset.ts` (streaming detector), `pipeline.ts`, `evaluate.ts`; `src/audio/wav.ts`, `recording.ts`; the worklet runs the detector and records raw chunks; `src/ui/strumView.ts` (flash, counter, log), `devDrawer.ts` + `devSettings.ts` (sliders: δ, λ, min gap, margin above room), `share.ts` (Web Share with files, download fallback); `tools/evaluate.ts`; `test/fixtures/README.md`; tests `test/onset.test.ts`, `wav.test.ts`, `recording.test.ts`. Sliders are not saved between page loads (on purpose: a reload always gives the tested defaults; "Copy settings" captures a tweak).
+
+**Strum detection and recording (Plain English).** The big box flashes green and the counter goes up on every strum the app hears. The log lists each one with its time since Start, how sharp it was ("strength") and how far above the room noise it was. A strum must be clearly louder than the room (10 dB by default) to count, so background noise should not trigger it. "Record" saves up to 2 minutes of the **unprocessed** microphone sound plus the strums found; "Share / save files" opens the Android share sheet so you can send the `.wav` and the results file. On Android the results file may arrive as `.json.txt`, because Chrome won't share `.json` files directly. That's fine. These recordings become the test library every later version must pass.
+
+**Export details (Technical).** WAV: raw path (before the high-pass), mono, 16-bit PCM, at the context sample rate. JSON (`strums-<local time>.json`): `{ format, formatVersion, sampleRate, device, build, recordedAt, durationSec, frames, noiseFloorDb, noiseFloorDbAtEnd, config: { onset, analysis, noiseFloor }, deviceInfo, events: [{ timeSec, strength, levelDb, sampleIndex }] }`, with times relative to the WAV start. Same shape as the draft label format, but the events are *detections*: hand-check them before saving as `*.labels.json`. Events are filtered at export time, so strums confirmed just after Stop are still included. Share order: `[wav, json]` → `[wav, json as .json.txt text/plain]` → `[wav]` + download the JSON → download both.
+
+**Noise floor and high-pass (Plain English).** The mic hears the room all the time (fans, fridge, traffic) because we deliberately switch off the phone's noise suppression, which would also damage the guitar sound. Instead of hiding that noise, the meter now *measures* it. For 2 seconds after Start the screen says "Stay quiet..." and the app learns how loud your room is. After that, everything up to "room level + 6 dB" is drawn grey, and only sound clearly above the room lights up green/amber/red, with a big "Quiet" / "Sound!" label. Very low rumble (below the guitar's lowest string) is filtered out before measuring, so bumps, handling noise and mains hum don't move the meter. The raw recording is not changed by any of this. The measured room level will also be what strum detection (0.2) compares against.
+
+**Noise floor and high-pass (Technical).**
+- *Two paths in the worklet.* Raw input is never modified (clip detection now, recording in 0.2). The analysis path is the input through `analysisConfig.highPassStages` x 2nd-order Butterworth HPF at `analysisConfig.highPassHz` (70 Hz; RBJ biquad, TDF-II, state carried across 128-frame quanta). `LevelMessage` carries analysis `sumSquares`/`peak` plus `rawSumSquares`/`rawPeak`; `clipCount` is from the raw signal. Meter, peak hold and noise floor use the analysis path.
+- *Filter numbers (1 stage, 48 kHz):* -3 dB at 70 Hz, -1.8 dB at 82 Hz (low E), -0.7 dB at 110 Hz, -4.6 dB at 60 Hz, -6.8 dB at 50 Hz, -14.9 dB at 30 Hz. It weakens rumble, it does not remove it: rumble 17 dB above the noise still adds ~4.5 dB to the measured floor (tested). `highPassStages: 2` gives ~-29 dB at 30 Hz at the cost of ~2 dB more loss at 82 Hz.
+- *Initial floor:* `noiseFloorConfig.initialPercentile` (p90) of per-block (1024-frame, ~21 ms) analysis RMS in dBFS over `quietMeasureMs` (2 s). Clamped at `minDb` (-100), i.e. below the meter's -60 dB scale, so quiet phones get a real number.
+- *Tracker:* blocks are grouped into `trackWindowMs` (1 s) windows; the window's p90 moves the floor: down at up to `fallDbPerSec` (10), up at up to `riseDbPerSec` (0.5), and windows above floor + `ignoreAboveDb` (10) are ignored. So a strum during the quiet measurement is corrected within a few seconds, and playing never raises the floor. Trade-off: if the room suddenly gets >10 dB louder (e.g. a TV turns on) the tracker will not follow; the "Measure room again" button restarts the quiet measurement.
+- *Display:* "above room" = smoothed level > floor + `roomMarginDb` (6). Readouts "Room noise" (rounded dBFS) and "Above room" (level - floor). If the initial floor > `noisyRoomDb` (-35 dBFS) a "noisy room" hint is shown. Device info / Copy info gain "Analysis high-pass" and "Room noise floor" (now + at start).
+- *Headless note:* Chromium's fake mic is a periodic full-scale beep with digital silence in between, so the measured floor varies a lot run to run (-48 to -78 dBFS seen) and the chip mostly reads "Sound!". Only a real phone can judge the Quiet/Sound split.
 
 ---
 
@@ -285,6 +354,7 @@ prototype/                     # Phase 0 web prototype (kept separate from any f
 11. **Single chords:** in Test mode choose "10 × each chord". Strum each chord 10 times, one strum per click, with a full downstroke across all the strings in the shape.
 12. **Slow progression:** choose "Progression – slow" (e.g. 60 BPM): Am → C → G → D, one strum per beat, 4 times through.
 13. **Medium progression:** same at "medium" (e.g. 90 BPM).
+13b. **Strumming pattern:** choose "Pattern": play a down-down-up-up-down-up pattern on each chord, one chord per bar, at slow tempo. This checks that up-strums are counted too.
 14. **Silence check:** choose "Silence – 1 minute". Hold the guitar without playing and let strings ring or touch them lightly, as you naturally would. This counts false triggers.
 15. After each test the screen shows a **score card**. Take a screenshot or note the numbers.
 
@@ -302,7 +372,7 @@ Each milestone ends with a link you can open on your phone.
 
 | # | Milestone | What you'll see | Acceptance criteria |
 |---|---|---|---|
-| **0.1** | Mic + level meter on the phone | Start button, level meter, device info panel | Works on iOS Safari and Android Chrome over HTTPS. Meter responds to the guitar. Processing-off settings are reported. Deploy pipeline works (push → live link). Survives lock/unlock with a "tap to resume". |
+| **0.1** | Mic + level meter on the phone | Start button, level meter, device info panel | Works in Android Chrome over HTTPS (on every Android phone the owner has). Meter responds to the guitar. Processing-off settings are reported. Deploy pipeline works (push → live link). Survives lock/unlock with a "tap to resume". |
 | **0.2** | Strum (onset) detection | A flash plus a log line on every strum, sensitivity slider | Recall ≥ 95% and < 1 false trigger/min on the first recordings. One event per strum (no doubles). Recording/export of raw audio works early so we can start the golden set. |
 | **0.3** | Chroma + chord classification | Big chord name for every strum | ≥ 85% correct on clean single-chord strums without calibration (first pass). Golden tests run in Node. Meyda cross-check agrees. |
 | **0.4** | Confidence + calibration | Confidence %, "?" when unsure, latency test, "teach it my guitar" | ≥ 90% correct after per-player calibration. Wrong-but-confident ≤ 3%. Latency calibration gives repeatable values (±5 ms across 3 runs). Timing error median < 15 ms, p95 < 30 ms. |
@@ -316,10 +386,10 @@ Each milestone ends with a link you can open on your phone.
 
 ### 8.1 Assumptions (made for Phase 0 only; not game rules)
 - A1. Standard tuning, no capo, open-position shapes as in the table in 2.3.
-- A2. Acoustic steel-string guitar played through the air into the phone's built-in mic. No cable or interface.
-- A3. Full strums (not single notes, arpeggios or muted strums). Down-strums in tests. Up-strums are logged but not yet targeted.
+- A2. **Confirmed:** acoustic steel-string guitar played through the air into the phone's built-in mic. No cable or interface.
+- A3. Full strums (not single notes, arpeggios or muted strums). **Updated:** the game will have an easier mode (which chord) and an advanced mode (strums on the beat with strumming patterns), so both down- and up-strums are targeted, and timing accuracy matters.
 - A4. Only Am, C, G, D, plus "none/unsure". Nothing else needs recognising yet.
-- A5. No game music plays from the phone while listening (except the test metronome).
+- A5. **Confirmed:** game audio (music, metronome) goes through **headphones** while listening, so the phone speaker stays quiet and the mic hears only the guitar. **Wired (USB-C) headphones are recommended**: Bluetooth headphones add ~100–300 ms of delay. That delay can be partly cancelled by the latency calibration, but it is less steady. In Phase 0 the metronome can also be a visual flash, so headphones are optional there.
 - A6. One player, quiet room, phone stationary.
 
 ### 8.2 Risks
@@ -333,6 +403,9 @@ Each milestone ends with a link you can open on your phone.
 - **R8. iOS interruptions** (calls, Siri, lock screen) stop audio. Must be handled gracefully; matters more in the real game.
 
 ### 8.3 Open questions for the game-director (and owner)
+
+**Answered by the owner (2026-10-05):** Q1, both modes: an easier "which chord" mode and an advanced mode with the beat and strumming patterns. Q4, no speaker music while listening; headphones are fine (developer recommends wired). Q10, Android phones and an acoustic guitar. The rest are still open, and none of them block Phase 0.
+
 1. **Timing vs. correctness:** will the game judge *when* you strum (rhythm game, on the beat) or only *which* chord? This sets how hard the latency targets must be.
 2. **Tempo and strumming patterns:** expected BPM range? One strum per chord change, or continuous down-up patterns (which affects the minimum gap between strums)?
 3. **Chord set growth:** will later levels add chords (Em, E, A, F, barre chords, 7ths)? A larger set makes template matching harder and may push towards ML earlier.
